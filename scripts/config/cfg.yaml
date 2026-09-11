@@ -94,8 +94,8 @@ record:
     # an object already placed earlier in the same episode (so objects spread
     # out instead of stacking).
     place_region:
-      x_range: [0.235, 0.3]
-      y_range: [-0.15, -0.012]
+      x_range: [0.14, 0.27]
+      y_range: [-0.418, -0.47]
     place_min_separation: 0.05 # m, min distance enforced between placements in one episode
     place_sampling_max_attempts: 200 # placement resample attempts before giving up
 
@@ -123,8 +123,8 @@ record:
     trajectory_waypoints: 3 # number of intermediate waypoints sampled along the bowed transfer path
 
   task:
-    description: "put the sharpener next to the blue box" # task description
-    num_episodes: 30 # number of episodes to record
+    description: "put the sharpener in the blue box" # task description
+    num_episodes: 15 # number of episodes to record
     display: True # Whether to display the data during recording
     resume: True
     # resume_dataset: scylearning/extinguish_alcohol_lamp_20260801_v01 # dataset to resume from if resume is True

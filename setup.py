@@ -23,6 +23,7 @@ setup(
         "send2trash",
         "scipy",
         "ur-rtde",
+        "pyyaml",
     ],
     scripts=[
         "scripts/tools/map_gripper.sh",
@@ -32,6 +33,7 @@ setup(
             "ur5e-record = scripts.core.run_record:main",
             "ur5e-replay = scripts.core.run_replay:main",
             "ur5e-visualize = scripts.core.run_visualize:main",
+            "ur5e-train-smolvla = scripts.core.train_smolvla:main",
             "tools-check-rs = scripts.tools.rs_devices:list_realsense_devices",
             "tools-check-info = scripts.tools.check_dataset_info:main",
             "tools-check-dataset = scripts.tools.check_dataset:main",
