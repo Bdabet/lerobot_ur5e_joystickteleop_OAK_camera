@@ -1,0 +1,24 @@
+# Maps each canonical recorded task string (must match the string exactly as it
+# appears in dataset's meta/tasks.parquet / dataset_info.txt) to a list of
+# meaning-preserving paraphrases. One of the alternatives (including the
+# original) is sampled at random for every training sample.
+#
+# Task strings not listed here are left unchanged during training.
+#
+# NOTE: "next to" (beside) and "in" (inside) are two distinct tasks in this
+# dataset — keep their paraphrases semantically separate; never let a "next to"
+# paraphrase read like "in", or vice versa.
+
+"put the package next to the blue box":
+  - "put the package next to the blue box"
+  - "place the package beside the blue box"
+  - "set the package down next to the blue box"
+  - "move the package so it's next to the blue box"
+  - "put the package alongside the blue box"
+
+"put the package in the blue box":
+  - "put the package in the blue box"
+  - "place the package inside the blue box"
+  - "drop the package into the blue box"
+  - "put the package into the blue box"
+  - "set the package down inside the blue box"

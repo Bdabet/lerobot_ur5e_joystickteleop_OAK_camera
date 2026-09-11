@@ -8,6 +8,7 @@ Core Commands:
   ur5e-record       Record keyboard teleoperation dataset
   ur5e-replay       Replay a recorded dataset
   ur5e-visualize    Visualize recorded dataset
+  ur5e-train-smolvla   Train SmolVLA with randomized task-instruction paraphrasing
 
 Tool Commands:
   tools-check-dataset   Check local dataset integrity
