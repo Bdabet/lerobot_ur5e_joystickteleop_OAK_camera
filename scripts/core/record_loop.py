@@ -2,6 +2,7 @@
 
 import time
 
+import numpy as np
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.utils import build_dataset_frame
 from lerobot.utils.constants import ACTION, OBS_STR
@@ -56,9 +57,12 @@ def record_loop(
                 processed_action,
                 prefix=ACTION,
             )
-            dataset.add_frame(
-                {**observation_frame, **action_frame, "task": single_task}
-            )
+            frame = {**observation_frame, **action_frame, "task": single_task}
+            if "phase" in dataset.features:
+                # Scripted controllers label what they're doing each tick
+                # (see auto_pickplace.Phase) so training can reweight by it.
+                frame["phase"] = np.array([getattr(teleop, "current_phase", 0)], dtype=np.int64)
+            dataset.add_frame(frame)
 
         if display_data:
             log_rerun_data(

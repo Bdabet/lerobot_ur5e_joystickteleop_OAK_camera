@@ -552,6 +552,10 @@ def run_record(record_cfg: RecordConfig):
         action_features = hw_to_dataset_features(robot.action_features, "action")
         obs_features = hw_to_dataset_features(robot.observation_features, "observation", use_video=True)
         dataset_features = {**action_features, **obs_features}
+        if record_cfg.mode == "auto_pick_place":
+            # Per-frame auto_pickplace.Phase label, used to reweight frames at
+            # training time (see scripts/utils/phase_weighting.py).
+            dataset_features["phase"] = {"dtype": "int64", "shape": (1,), "names": None}
 
         if record_cfg.resume:
             dataset = LeRobotDataset(
@@ -560,6 +564,16 @@ def run_record(record_cfg: RecordConfig):
 
             if hasattr(robot, "cameras") and len(robot.cameras) > 0:
                 dataset.start_image_writer()
+            # Follow whatever the existing dataset has: a dataset recorded
+            # before phase labels existed stays without them, and teleop
+            # frames appended to an auto_pick_place dataset get phase IDLE.
+            if "phase" in dataset.features:
+                dataset_features["phase"] = dataset.features["phase"]
+            elif "phase" in dataset_features:
+                logging.warning(
+                    "====== [WARNING] Resumed dataset has no 'phase' feature; recording without phase labels. ======"
+                )
+                del dataset_features["phase"]
             sanity_check_dataset_robot_compatibility(dataset, robot, record_cfg.fps, dataset_features)
         else:
             dataset = LeRobotDataset.create(
