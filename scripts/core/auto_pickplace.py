@@ -90,6 +90,12 @@ class AutoPickPlaceConfig:
         self.position_tolerance: float = cfg.get("position_tolerance", 0.003)
         self.rotation_tolerance: float = cfg.get("rotation_tolerance", 0.02)
         self.settle_timeout_s: float = cfg.get("settle_timeout_s", 1.5)
+        # If get_action() hasn't been called for longer than this (s) - the
+        # loop driving it was interrupted, e.g. Esc mid scene reset, and a
+        # later loop picks the same segments back up - the current segment
+        # restarts from wherever the arm is instead of treating its profile
+        # as long overdue and skipping the rest of the move.
+        self.resume_gap_s: float = cfg.get("resume_gap_s", 0.5)
 
         # Suction is switched on suction_lead_m before reaching the object
         # (like a person closing the hand on the way in), then held
@@ -231,6 +237,7 @@ class AutoPickPlaceController:
         self._segments: list[Segment] = []
         self._current_idx = 0
         self._active: _ActiveSegment | None = None
+        self._last_tick_time: float | None = None
         self._episode_complete = False
         self._last_gripper = 1.0
         # Per-object fixed height, set once during loading (index == object id).
@@ -351,6 +358,18 @@ class AutoPickPlaceController:
         current_position = np.array(current_pose[:3], dtype=float)
         current_rotation = R.from_rotvec(current_pose[3:])
         now = self._clock()
+        if (
+            self._active is not None
+            and self._last_tick_time is not None
+            and now - self._last_tick_time > self.config.resume_gap_s
+        ):
+            logger.info(
+                "====== [AUTO] Resuming segment '%s' after a %.1fs pause ======",
+                self._segments[self._current_idx].name,
+                now - self._last_tick_time,
+            )
+            self._active = None
+        self._last_tick_time = now
 
         segment = self._segments[self._current_idx]
         if (
@@ -501,6 +520,7 @@ class AutoPickPlaceController:
     def _set_segments(self, segments: list[Segment]) -> None:
         self._segments = segments
         self._current_idx = 0
+        self._last_tick_time = None
         self._active = None
         self._episode_complete = False
 

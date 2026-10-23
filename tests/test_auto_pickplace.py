@@ -233,6 +233,32 @@ def test_scene_reset_never_perturbs():
     assert not any(phase in (Phase.PERTURB, Phase.CORRECT) for phase, _, _ in trace)
 
 
+def test_pause_restarts_current_segment():
+    np.random.seed(5)
+    random.seed(5)
+    clock = FakeClock()
+    object_pose = [0.45, -0.3, 0.03, *CANONICAL_ROTVEC]
+    robot = FakeRobot([0.22, -0.47, 0.17, *CANONICAL_ROTVEC])
+    controller = _make_controller(robot, clock, object_pose)
+    controller.reset_step_size()
+
+    # Interrupt the first transit halfway, then resume 5s later.
+    for _ in range(30):
+        robot.apply(controller.get_action())
+        clock.t += 1.0 / FPS
+    segment = controller.current_segment
+    assert segment.phase == Phase.TRANSIT
+    clock.t += 5.0
+    controller.get_action()
+    assert controller.current_segment is segment
+    assert controller._active.start_time == clock.t
+    assert np.allclose(controller._active.start_position, robot.position)
+
+    trace = _run(controller, robot, clock)
+    grasp = next(p for phase, _, p in trace if phase == Phase.GRASP)
+    assert np.linalg.norm(grasp[:2] - np.array(object_pose[:2])) < 0.003
+
+
 def _run_all():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
