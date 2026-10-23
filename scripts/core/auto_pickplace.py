@@ -20,6 +20,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass, replace
+from enum import IntEnum
 from typing import Any
 
 import numpy as np
@@ -678,6 +679,80 @@ class AutoPickPlaceController:
             self.config.place_sampling_max_attempts,
         )
         return candidate
+
+
+class Phase(IntEnum):
+    """Per-frame label of what the scripted controller is doing, recorded into
+    the dataset (feature "phase") so training can reweight or exclude frames
+    by phase. PERTURB marks deliberately wrong motion (a misaligned approach,
+    a missed grasp) that should not be imitated; CORRECT marks the recovery
+    from it, which should."""
+
+    IDLE = 0
+    TRANSIT = 1
+    DESCEND = 2
+    GRASP = 3
+    LIFT = 4
+    RELEASE = 5
+    RETREAT = 6
+    PERTURB = 7
+    CORRECT = 8
+
+
+@dataclass
+class Segment:
+    """One time-parameterized move. The start pose is captured live from the
+    robot when the segment begins (so a move that follows an early force-stop
+    contact starts from wherever contact actually happened); the end pose is
+    either absolute (position/rotvec) or relative to that start (offset), and
+    a segment with neither is a hold in place for duration_s."""
+
+    name: str
+    phase: Phase
+    gripper: float | None  # set at segment start; None keeps the current value
+    position: np.ndarray | None = None
+    rotvec: np.ndarray | None = None
+    offset: np.ndarray | None = None
+    speed: float | None = None  # peak linear speed (m/s) of the min-jerk profile
+    duration_s: float | None = None  # fixed duration, for holds
+    cruise_z: float | None = None  # if set, follow a cubic Bezier lifted to about this height
+    force_stop: bool = False  # TCP-force contact ends this segment (and any directly following force_stop ones)
+
+
+# Peak/average velocity ratio of the minimum-jerk profile: a move of length d
+# at peak speed v takes MIN_JERK_PEAK_RATIO * d / v seconds.
+MIN_JERK_PEAK_RATIO = 1.875
+
+
+def _min_jerk(tau: float) -> float:
+    """Minimum-jerk progress s(tau) for tau in [0, 1]: zero velocity and
+    acceleration at both ends, bell-shaped speed in between - the profile
+    human point-to-point reaches follow."""
+    tau = min(max(tau, 0.0), 1.0)
+    return tau**3 * (10.0 - 15.0 * tau + 6.0 * tau**2)
+
+
+def _cubic_bezier(points: np.ndarray, s: float) -> np.ndarray:
+    p0, p1, p2, p3 = points
+    return (1 - s) ** 3 * p0 + 3 * (1 - s) ** 2 * s * p1 + 3 * (1 - s) * s**2 * p2 + s**3 * p3
+
+
+def _transit_control_points(start: np.ndarray, end: np.ndarray, cruise_z: float) -> np.ndarray:
+    """Control points of a lift -> carry -> lower path: leaves start going up,
+    arrives at end coming down, peaking a bit below cruise_z in between."""
+    cruise_z = max(cruise_z, start[2], end[2])
+    return np.array([start, [start[0], start[1], cruise_z], [end[0], end[1], cruise_z], end], dtype=float)
+
+
+def _bezier_length(points: np.ndarray, samples: int = 32) -> float:
+    curve = np.array([_cubic_bezier(points, s) for s in np.linspace(0.0, 1.0, samples + 1)])
+    return float(np.sum(np.linalg.norm(np.diff(curve, axis=0), axis=1)))
+
+
+def _sample_horizontal_offset(magnitude_range: tuple[float, float]) -> np.ndarray:
+    angle = np.random.uniform(0.0, 2.0 * np.pi)
+    magnitude = np.random.uniform(*magnitude_range)
+    return np.array([magnitude * np.cos(angle), magnitude * np.sin(angle), 0.0])
 
 
 def _clip_to_norm(vector: np.ndarray, max_norm: float) -> np.ndarray:
