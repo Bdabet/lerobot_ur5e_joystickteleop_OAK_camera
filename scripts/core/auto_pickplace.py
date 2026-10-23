@@ -107,6 +107,23 @@ class AutoPickPlaceConfig:
         # from wherever it actually is before the transit arc starts.
         self.force_stop_clearance_height: float = cfg.get("force_stop_clearance_height", 0.02)
 
+        # Recovery demonstrations, so the policy sees how to get back on track
+        # from the kinds of mistakes it will make. Per object and per
+        # approach (pick or place), with probability misalign_prob the
+        # transit ends misalign_range meters off to the side, starts down,
+        # then corrects back over the target; at the pick only, with
+        # probability miss_grasp_prob it instead goes all the way down
+        # miss_offset beside the object (cup in the air, nothing to grab),
+        # switches suction on, lifts, switches it off and goes back to the
+        # real object. miss_offset must clear the object's half-width plus
+        # the cup radius. The wrong part is recorded as Phase.PERTURB, the
+        # recovery as Phase.CORRECT. Scene resets never use these.
+        self.misalign_prob: float = cfg.get("misalign_prob", 0.0)
+        self.misalign_range: tuple[float, float] = tuple(cfg.get("misalign_range", [0.015, 0.03]))
+        self.miss_grasp_prob: float = cfg.get("miss_grasp_prob", 0.0)
+        self.miss_offset: float = cfg.get("miss_offset", 0.05)
+        self.correct_speed: float = cfg.get("correct_speed", 0.06)
+
         self.shuffle_pick_order: bool = cfg.get("shuffle_pick_order", True)
         self.pick_min_separation: float = cfg.get("pick_min_separation", 0.05)
         self.place_min_separation: float = cfg.get("place_min_separation", 0.05)
@@ -305,7 +322,9 @@ class AutoPickPlaceController:
             reset_positions.append(np.array(reset_target[:3], dtype=float))
             self._object_positions[object_idx] = reset_target
             segments.extend(
-                self._pick_place_block(i, placed_pose, reset_target, transit_speed, name_prefix="reset_")
+                self._pick_place_block(
+                    i, placed_pose, reset_target, transit_speed, name_prefix="reset_", allow_recovery=False
+                )
             )
             logger.info(
                 "====== [AUTO] Reset %d/%d: from=%s to=%s ======",
@@ -601,30 +620,26 @@ class AutoPickPlaceController:
         target_pose: list[float],
         transit_speed: float,
         name_prefix: str = "",
+        allow_recovery: bool = True,
     ) -> list[Segment]:
         """Segments moving one object from source_pose to target_pose, starting
         from wherever the arm is: arc over to just above the object, descend
         slowly (suction on just before contact), seal, lift clear, arc over to
-        just above the target, descend, release, retreat up."""
+        just above the target, descend, release, retreat up. With
+        allow_recovery, either approach may first go wrong and recover (see
+        AutoPickPlaceConfig.misalign_prob/miss_grasp_prob)."""
         source_position = np.array(source_pose[:3], dtype=float)
         source_rotvec = np.array(source_pose[3:], dtype=float)
         target_position = np.array(target_pose[:3], dtype=float)
         target_rotvec = np.array(target_pose[3:], dtype=float)
-        above = np.array([0.0, 0.0, self.config.align_height])
         cruise_z = max(source_position[2], target_position[2]) + self.config.approach_height
 
         def name(step: str) -> str:
             return f"{name_prefix}{step}_{index}"
 
         segments = [
-            Segment(
-                name("transit_to_pick"),
-                Phase.TRANSIT,
-                gripper=0.0,
-                position=source_position + above,
-                rotvec=source_rotvec,
-                speed=transit_speed,
-                cruise_z=cruise_z,
+            *self._approach_segments(
+                name, source_position, source_rotvec, transit_speed, cruise_z, pick=True, allow_recovery=allow_recovery
             ),
             *self._descend_segments(name, source_position, source_rotvec, suction=True),
             Segment(name("grasp"), Phase.GRASP, gripper=1.0, duration_s=self.config.grasp_seal_s),
@@ -635,14 +650,8 @@ class AutoPickPlaceController:
                 offset=np.array([0.0, 0.0, self.config.force_stop_clearance_height]),
                 speed=self.config.descend_speed,
             ),
-            Segment(
-                name("transit_to_place"),
-                Phase.TRANSIT,
-                gripper=None,
-                position=target_position + above,
-                rotvec=target_rotvec,
-                speed=transit_speed,
-                cruise_z=cruise_z,
+            *self._approach_segments(
+                name, target_position, target_rotvec, transit_speed, cruise_z, pick=False, allow_recovery=allow_recovery
             ),
             *self._descend_segments(name, target_position, target_rotvec, suction=False),
             Segment(name("release"), Phase.RELEASE, gripper=0.0, duration_s=self.config.release_s),
@@ -656,17 +665,96 @@ class AutoPickPlaceController:
         ]
         return segments
 
-    def _descend_segments(self, name, position: np.ndarray, rotvec: np.ndarray, suction: bool) -> list[Segment]:
+    def _approach_segments(
+        self,
+        name,
+        position: np.ndarray,
+        rotvec: np.ndarray,
+        transit_speed: float,
+        cruise_z: float,
+        pick: bool,
+        allow_recovery: bool,
+    ) -> list[Segment]:
+        """Arc over to align_height above position, possibly via a recovered
+        mistake. The normal descent onto position follows these segments."""
+        above = np.array([0.0, 0.0, self.config.align_height])
+        step = "pick" if pick else "place"
+        # Open the gripper on the way to a pick; keep holding on the way to a place.
+        gripper = 0.0 if pick else None
+
+        def transit(phase: Phase, offset: np.ndarray) -> Segment:
+            return Segment(
+                name(f"transit_to_{step}"),
+                phase,
+                gripper=gripper,
+                position=position + offset + above,
+                rotvec=rotvec,
+                speed=transit_speed,
+                cruise_z=cruise_z,
+            )
+
+        def correct_to_above(height: float) -> Segment:
+            return Segment(
+                name(f"correct_{step}"),
+                Phase.CORRECT,
+                gripper=gripper,
+                position=position + np.array([0.0, 0.0, height]),
+                rotvec=rotvec,
+                speed=self.config.correct_speed,
+            )
+
+        if allow_recovery and pick and random.random() < self.config.miss_grasp_prob:
+            miss = _sample_horizontal_offset((self.config.miss_offset, self.config.miss_offset))
+            logger.info("====== [AUTO] Recovery: missed grasp %s off target ======", np.round(miss[:2], 3))
+            return [
+                transit(Phase.PERTURB, miss),
+                *self._descend_segments(name, position + miss, rotvec, suction=True, phase=Phase.PERTURB),
+                Segment(name("missed_grasp"), Phase.PERTURB, gripper=1.0, duration_s=self.config.grasp_seal_s),
+                Segment(
+                    name("missed_lift"),
+                    Phase.PERTURB,
+                    gripper=None,
+                    position=position + miss + above,
+                    rotvec=rotvec,
+                    speed=self.config.descend_speed,
+                ),
+                correct_to_above(self.config.align_height),
+            ]
+
+        if allow_recovery and random.random() < self.config.misalign_prob:
+            misalign = _sample_horizontal_offset(self.config.misalign_range)
+            logger.info("====== [AUTO] Recovery: misaligned %s by %s ======", step, np.round(misalign[:2], 3))
+            halfway = 0.5 * self.config.align_height
+            return [
+                transit(Phase.PERTURB, misalign),
+                Segment(
+                    name(f"misaligned_{step}"),
+                    Phase.PERTURB,
+                    gripper=None,
+                    position=position + misalign + np.array([0.0, 0.0, halfway]),
+                    rotvec=rotvec,
+                    speed=self.config.descend_speed,
+                ),
+                correct_to_above(halfway),
+            ]
+
+        return [transit(Phase.TRANSIT, np.zeros(3))]
+
+    def _descend_segments(
+        self, name, position: np.ndarray, rotvec: np.ndarray, suction: bool, phase: Phase = Phase.DESCEND
+    ) -> list[Segment]:
         """Slow force-stop descent onto position. When suction is True, the
         last suction_lead_m is split off and switches suction on as it starts."""
         lead = self.config.suction_lead_m if suction else 0.0
         step = "descend_pick" if suction else "descend_place"
+        if phase == Phase.PERTURB:
+            step = f"missed_{step}"
         segments = []
         if lead > 0.0:
             segments.append(
                 Segment(
                     name(step),
-                    Phase.DESCEND,
+                    phase,
                     gripper=None,
                     position=position + np.array([0.0, 0.0, lead]),
                     rotvec=rotvec,
@@ -677,7 +765,7 @@ class AutoPickPlaceController:
         segments.append(
             Segment(
                 name(f"{step}_contact"),
-                Phase.DESCEND,
+                phase,
                 gripper=1.0 if suction else None,
                 position=position,
                 rotvec=rotvec,

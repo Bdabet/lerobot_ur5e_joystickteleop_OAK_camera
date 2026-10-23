@@ -4,6 +4,8 @@ Runs under pytest, or directly: `python3 -m tests.test_auto_pickplace` from
 the lerobot_ur5e_keyteleop directory.
 """
 
+import random
+
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -167,6 +169,68 @@ def test_force_stop_skips_rest_of_descent():
     assert all(p[2] > 0.04 for p in grasp_positions)
     # Suction still came on even though contact cut the descent short.
     assert any(g == 1.0 for phase, g, _ in trace if phase == Phase.GRASP)
+
+
+def _phase_runs(trace):
+    phases = [phase for phase, _, _ in trace]
+    return [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
+
+
+def test_misaligned_approach_is_corrected():
+    np.random.seed(2)
+    random.seed(2)
+    clock = FakeClock()
+    object_pose = [0.45, -0.3, 0.03, *CANONICAL_ROTVEC]
+    robot = FakeRobot([0.22, -0.47, 0.17, *CANONICAL_ROTVEC])
+    controller = _make_controller(robot, clock, object_pose, {"misalign_prob": 1.0})
+    controller.reset_step_size()
+    trace = _run(controller, robot, clock)
+
+    assert _phase_runs(trace) == [
+        Phase.PERTURB, Phase.CORRECT, Phase.DESCEND, Phase.GRASP, Phase.LIFT,
+        Phase.PERTURB, Phase.CORRECT, Phase.DESCEND, Phase.RELEASE, Phase.RETREAT,
+    ], _phase_runs(trace)
+    # The perturbation really is off target, and the grasp happens on it.
+    perturb_end = next(i for i, (phase, _, _) in enumerate(trace) if phase == Phase.CORRECT) - 1
+    off = np.linalg.norm(trace[perturb_end][2][:2] - np.array(object_pose[:2]))
+    assert 0.012 < off < 0.033, off
+    grasp = next(p for phase, _, p in trace if phase == Phase.GRASP)
+    assert np.linalg.norm(grasp[:2] - np.array(object_pose[:2])) < 0.003
+
+
+def test_missed_grasp_retries():
+    np.random.seed(3)
+    random.seed(3)
+    clock = FakeClock()
+    object_pose = [0.45, -0.3, 0.03, *CANONICAL_ROTVEC]
+    robot = FakeRobot([0.22, -0.47, 0.17, *CANONICAL_ROTVEC])
+    controller = _make_controller(robot, clock, object_pose, {"miss_grasp_prob": 1.0})
+    controller.reset_step_size()
+    trace = _run(controller, robot, clock)
+
+    assert _phase_runs(trace)[:4] == [Phase.PERTURB, Phase.CORRECT, Phase.DESCEND, Phase.GRASP]
+    # Suction on during the miss, off for the correction, on again for the real grasp.
+    grippers = [(phase, g) for phase, g, _ in trace]
+    assert any(phase == Phase.PERTURB and g == 1.0 for phase, g in grippers)
+    assert all(g == 0.0 for phase, g in grippers if phase == Phase.CORRECT)
+    lowest_miss = min((p for phase, _, p in trace if phase == Phase.PERTURB), key=lambda p: p[2])
+    assert abs(np.linalg.norm(lowest_miss[:2] - np.array(object_pose[:2])) - 0.05) < 0.003
+    assert lowest_miss[2] < object_pose[2] + 0.003
+
+
+def test_scene_reset_never_perturbs():
+    np.random.seed(4)
+    random.seed(4)
+    clock = FakeClock()
+    robot = FakeRobot([0.22, -0.47, 0.17, *CANONICAL_ROTVEC])
+    controller = _make_controller(
+        robot, clock, [0.45, -0.3, 0.03, *CANONICAL_ROTVEC], {"misalign_prob": 1.0, "miss_grasp_prob": 1.0}
+    )
+    controller.reset_step_size()
+    _run(controller, robot, clock)
+    assert controller.build_scene_reset_waypoints()
+    trace = _run(controller, robot, clock)
+    assert not any(phase in (Phase.PERTURB, Phase.CORRECT) for phase, _, _ in trace)
 
 
 def _run_all():
