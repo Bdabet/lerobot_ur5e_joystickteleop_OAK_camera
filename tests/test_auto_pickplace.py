@@ -5,13 +5,82 @@ the lerobot_ur5e_keyteleop directory.
 """
 
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 
 from scripts.core.auto_pickplace import (
+    AutoPickPlaceConfig,
+    AutoPickPlaceController,
+    Phase,
     _bezier_length,
     _cubic_bezier,
     _min_jerk,
     _transit_control_points,
 )
+
+FPS = 30
+CANONICAL_ROTVEC = [np.pi, 0.0, 0.0]
+CONFIG = {
+    "pick_region": {"x_range": [0.4, 0.5], "y_range": [-0.55, -0.06]},
+    "place_region": {"x_range": [0.14, 0.27], "y_range": [-0.47, -0.418]},
+    "force_stop_enabled": True,
+    "contact_force_threshold": 10.0,
+}
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class FakeRobot:
+    """Integrates each commanded delta with a one-tick-style tracking lag, and
+    reports a contact force once the TCP is pushed below contact_z."""
+
+    def __init__(self, pose, tracking=0.8, contact_z=-np.inf):
+        self.position = np.array(pose[:3], dtype=float)
+        self.rotation = R.from_rotvec(pose[3:])
+        self.tracking = tracking
+        self.contact_z = contact_z
+
+    def get_ee_pose(self):
+        return [*self.position.tolist(), *self.rotation.as_rotvec().tolist()]
+
+    def get_tcp_force(self):
+        return [0.0, 0.0, 20.0 if self.position[2] < self.contact_z else 0.0]
+
+    def apply(self, action):
+        delta = np.array([action["delta_x"], action["delta_y"], action["delta_z"]])
+        if self.position[2] + delta[2] < self.contact_z - 0.001:
+            delta[2] = self.contact_z - 0.001 - self.position[2]  # can't push through a rigid surface
+        self.position += self.tracking * delta
+        rot = np.array([action["delta_rx"], action["delta_ry"], action["delta_rz"]])
+        self.rotation = R.from_rotvec(self.tracking * rot) * self.rotation
+
+
+def _make_controller(robot, clock, object_pose, extra_cfg=None):
+    controller = AutoPickPlaceController(
+        AutoPickPlaceConfig({**CONFIG, **(extra_cfg or {})}), use_gripper=True, clock=clock
+    )
+    controller.set_robot(robot)
+    controller.set_canonical_orientation_from_current_pose()
+    controller.register_loaded_object(object_pose, object_pose[2])
+    return controller
+
+
+def _run(controller, robot, clock, max_ticks=20000):
+    """Step until the sequence completes; returns per-tick (phase, gripper, position)."""
+    trace = []
+    for _ in range(max_ticks):
+        action = controller.get_action()
+        if controller.episode_complete:
+            return trace
+        trace.append((controller.current_phase, action["gripper_position"], robot.position.copy()))
+        robot.apply(action)
+        clock.t += 1.0 / FPS
+    raise AssertionError("sequence did not complete")
 
 
 def test_min_jerk_endpoints_and_symmetry():
@@ -43,6 +112,61 @@ def test_transit_path_lifts_then_lowers():
     assert 0 < peak_idx < 20
     assert zs[peak_idx] > max(start[2], end[2]) + 0.1
     assert _bezier_length(points) > np.linalg.norm(end - start)
+
+
+def test_episode_picks_and_places_smoothly():
+    np.random.seed(0)
+    clock = FakeClock()
+    object_pose = [0.45, -0.3, 0.03, *CANONICAL_ROTVEC]
+    robot = FakeRobot([0.22, -0.47, 0.17, *CANONICAL_ROTVEC])
+    controller = _make_controller(robot, clock, object_pose)
+    controller.reset_step_size()
+    trace = _run(controller, robot, clock)
+
+    phases = [phase for phase, _, _ in trace]
+    order = [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
+    assert order == [
+        Phase.TRANSIT, Phase.DESCEND, Phase.GRASP, Phase.LIFT,
+        Phase.TRANSIT, Phase.DESCEND, Phase.RELEASE, Phase.RETREAT,
+    ], order
+
+    # Suction is on from just before contact until the release.
+    grippers = [g for _, g, _ in trace]
+    first_on = grippers.index(1.0)
+    assert phases[first_on] == Phase.DESCEND
+    assert np.linalg.norm(trace[first_on][2] - np.array(object_pose[:3])) < 0.01
+    assert phases[grippers.index(0.0, first_on)] == Phase.RELEASE
+
+    # Ended above the sampled place pose.
+    place_pose = controller._object_positions[0]
+    assert np.allclose(robot.position[:2], place_pose[:2], atol=0.003)
+
+    # Smooth: no tick-to-tick speed jumps beyond a few mm/tick^2.
+    positions = np.array([p for _, _, p in trace])
+    speeds = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+    assert speeds.max() <= controller.config.max_step_size + 1e-9
+    assert np.abs(np.diff(speeds)).max() < 0.002
+
+    # Near-object phases are a meaningful share of the episode.
+    near = sum(p in (Phase.DESCEND, Phase.GRASP, Phase.LIFT, Phase.RELEASE) for p in phases)
+    assert near / len(phases) > 0.25, near / len(phases)
+
+
+def test_force_stop_skips_rest_of_descent():
+    np.random.seed(1)
+    clock = FakeClock()
+    object_pose = [0.45, -0.3, 0.03, *CANONICAL_ROTVEC]
+    # The object is really 1.5cm taller than registered.
+    robot = FakeRobot([0.45, -0.3, 0.12, *CANONICAL_ROTVEC], contact_z=0.045)
+    controller = _make_controller(robot, clock, object_pose)
+    controller.reset_step_size()
+    trace = _run(controller, robot, clock)
+
+    grasp_positions = [p for phase, _, p in trace if phase == Phase.GRASP]
+    assert grasp_positions, "grasp never ran"
+    assert all(p[2] > 0.04 for p in grasp_positions)
+    # Suction still came on even though contact cut the descent short.
+    assert any(g == 1.0 for phase, g, _ in trace if phase == Phase.GRASP)
 
 
 def _run_all():
