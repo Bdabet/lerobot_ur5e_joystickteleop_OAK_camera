@@ -104,6 +104,11 @@ class AutoPickPlaceConfig:
         self.suction_lead_m: float = cfg.get("suction_lead_m", 0.005)
         self.grasp_seal_s: float = cfg.get("grasp_seal_s", 0.25)
         self.release_s: float = cfg.get("release_s", 0.25)
+        # Hold still for this long (s) after the last object's retreat, right
+        # above it, so every episode ends with a recognizable "done -> stay
+        # put" pattern instead of stopping mid-motion. Episodes only, not
+        # scene resets. 0 disables it.
+        self.end_hold_s: float = cfg.get("end_hold_s", 1.0)
 
         # Stop the downward pick/place move early on TCP force contact instead
         # of servoing all the way to the (possibly optimistic) target depth.
@@ -152,6 +157,7 @@ class Phase(IntEnum):
     RETREAT = 6
     PERTURB = 7
     CORRECT = 8
+    DONE = 9
 
 
 @dataclass
@@ -292,9 +298,11 @@ class AutoPickPlaceController:
 
     @property
     def current_phase(self) -> int:
-        """Phase of the segment that produced the most recent action."""
-        segment = self.current_segment
-        return int(segment.phase if segment is not None else Phase.IDLE)
+        """Phase of the segment that produced the most recent action - on the
+        tick that completes the sequence, that's still the final segment."""
+        if not self._segments:
+            return int(Phase.IDLE)
+        return int(self._segments[self._current_idx].phase)
 
     @property
     def episode_complete(self) -> bool:
@@ -629,6 +637,9 @@ class AutoPickPlaceController:
                 [round(v, 4) for v in pick_pose],
                 [round(v, 4) for v in place_sampled],
             )
+
+        if self.config.end_hold_s > 0.0:
+            segments.append(Segment("done", Phase.DONE, gripper=None, duration_s=self.config.end_hold_s))
 
         self._last_placements = placements
         return segments

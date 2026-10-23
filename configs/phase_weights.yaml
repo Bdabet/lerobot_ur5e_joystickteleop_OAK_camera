@@ -9,3 +9,4 @@ RELEASE: 4
 RETREAT: 1
 PERTURB: 0  # deliberately wrong motion - kept only as context for CORRECT
 CORRECT: 3
+DONE: 1  # end-of-episode hold above the last object

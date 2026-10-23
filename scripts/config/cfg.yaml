@@ -118,6 +118,7 @@ record:
     suction_lead_m: 0.005 # m above the object at which suction switches on during the descent
     grasp_seal_s: 0.25 # s, hold at the object after contact so the suction seal forms
     release_s: 0.25 # s, hold at the place point after switching suction off
+    end_hold_s: 1.0 # s, hold still above the last placed object before the episode ends (a clear 'done' pattern); 0 disables
 
     force_stop_enabled: True # if True, stop the downward pick/place move early on TCP force contact instead of servoing to the assumed depth
     contact_force_threshold: 10.0 # N, TCP force magnitude that counts as "touched the object"

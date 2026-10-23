@@ -129,7 +129,7 @@ def test_episode_picks_and_places_smoothly():
     order = [p for i, p in enumerate(phases) if i == 0 or p != phases[i - 1]]
     assert order == [
         Phase.TRANSIT, Phase.DESCEND, Phase.GRASP, Phase.LIFT,
-        Phase.TRANSIT, Phase.DESCEND, Phase.RELEASE, Phase.RETREAT,
+        Phase.TRANSIT, Phase.DESCEND, Phase.RELEASE, Phase.RETREAT, Phase.DONE,
     ], order
 
     # Suction is on from just before contact until the release.
@@ -188,7 +188,7 @@ def test_misaligned_approach_is_corrected():
 
     assert _phase_runs(trace) == [
         Phase.PERTURB, Phase.CORRECT, Phase.DESCEND, Phase.GRASP, Phase.LIFT,
-        Phase.PERTURB, Phase.CORRECT, Phase.DESCEND, Phase.RELEASE, Phase.RETREAT,
+        Phase.PERTURB, Phase.CORRECT, Phase.DESCEND, Phase.RELEASE, Phase.RETREAT, Phase.DONE,
     ], _phase_runs(trace)
     # The perturbation really is off target, and the grasp happens on it.
     perturb_end = next(i for i, (phase, _, _) in enumerate(trace) if phase == Phase.CORRECT) - 1
@@ -257,6 +257,30 @@ def test_pause_restarts_current_segment():
     trace = _run(controller, robot, clock)
     grasp = next(p for phase, _, p in trace if phase == Phase.GRASP)
     assert np.linalg.norm(grasp[:2] - np.array(object_pose[:2])) < 0.003
+
+
+def test_episode_ends_holding_above_last_object():
+    np.random.seed(6)
+    random.seed(6)
+    clock = FakeClock()
+    robot = FakeRobot([0.22, -0.47, 0.17, *CANONICAL_ROTVEC])
+    controller = _make_controller(robot, clock, [0.45, -0.3, 0.03, *CANONICAL_ROTVEC])
+    controller.register_loaded_object([0.47, -0.15, 0.03, *CANONICAL_ROTVEC], 0.03)
+    controller.reset_step_size()
+    trace = _run(controller, robot, clock)
+
+    done = [p for phase, _, p in trace if phase == Phase.DONE]
+    assert abs(len(done) - FPS * controller.config.end_hold_s) <= 2, len(done)
+    assert np.ptp(np.array(done), axis=0).max() < 0.001  # holding still
+    last_place = controller._last_placements[-1][1]
+    assert np.allclose(done[-1][:2], last_place[:2], atol=0.003)
+    assert done[-1][2] > last_place[2] + controller.config.approach_height - 0.005
+    # The completing tick is labelled with the final segment, not IDLE.
+    assert controller.current_phase == Phase.DONE
+
+    # Scene resets don't hold at the end.
+    assert controller.build_scene_reset_waypoints()
+    assert not any(phase == Phase.DONE for phase, _, _ in _run(controller, robot, clock))
 
 
 def _run_all():
