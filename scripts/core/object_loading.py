@@ -128,12 +128,12 @@ def load_objects_into_regions(
                 num_objects,
             )
             # The scripted hold step above just turned suction on; seed the
-            # jog teleop's own gripper state to match ("closed"/holding)
-            # instead of its normal open-on-connect default, so handing off
-            # control doesn't drop the object. Release itself is scripted
+            # jog teleop's own gripper state to match (1 = CLOSE, suction on)
+            # instead of its normal open-on-connect default (0), so handing
+            # off control doesn't drop the object. Release itself is scripted
             # right after (build_retreat_after_manual_place_waypoints), not
             # left to the operator to remember.
-            jog_teleop.gripper_action = 0
+            jog_teleop.gripper_action = 1
             jog_teleop.reset_step_size()
             _run_step(
                 record_cfg,

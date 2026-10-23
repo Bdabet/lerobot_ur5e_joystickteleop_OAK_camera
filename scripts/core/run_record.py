@@ -77,7 +77,10 @@ def check_graceful_stop_requested() -> bool:
     return requested
 
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+# force=True: an earlier import has already configured the root logger,
+# which would otherwise make this a silent no-op and hide every INFO
+# message (loading prompts, episode progress).
+logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 
 class RecordConfig:
     def __init__(self, cfg: Dict[str, Any]):
