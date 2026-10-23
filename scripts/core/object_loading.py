@@ -6,7 +6,7 @@ auto_pick_place.object_load_hold_s seconds so the operator can hand it the
 object, then control is handed to a manual jog teleop so the operator can
 move the (suctioned) object down onto the table wherever they like; pressing
 the right arrow key (the same "confirm" convention used elsewhere in this
-codebase) ends the jog. The gripper is then released by a scripted waypoint
+codebase) ends the jog. The gripper is then released by a scripted segment
 (not left to the operator to remember to do themselves) before the arm lifts
 away. The object's actual height at that point becomes its fixed height for
 the rest of the run, and where it was released becomes its starting position
