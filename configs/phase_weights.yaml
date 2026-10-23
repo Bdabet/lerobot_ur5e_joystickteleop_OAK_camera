@@ -1,0 +1,11 @@
+# How many times each frame is repeated per training epoch, by its recorded
+# phase (scripts/core/auto_pickplace.Phase). 0 drops the frame; phases not
+# listed here count once. Only applies to datasets with a "phase" feature.
+TRANSIT: 1
+DESCEND: 3
+GRASP: 4
+LIFT: 3
+RELEASE: 4
+RETREAT: 1
+PERTURB: 0  # deliberately wrong motion - kept only as context for CORRECT
+CORRECT: 3
