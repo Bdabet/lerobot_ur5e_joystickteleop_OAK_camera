@@ -99,28 +99,38 @@ record:
     place_min_separation: 0.05 # m, min distance enforced between placements in one episode
     place_sampling_max_attempts: 200 # placement resample attempts before giving up
 
-    approach_height: 0.16 # m, hover offset above pick/place pose for approach/retreat waypoints
-    max_step_size: 0.03 # m per tick, position streaming cap (~0.22 m/s at fps=15; raised now that servoL isn't force-limited)
-    max_rot_step_size: 0.03 # rad per tick, orientation streaming cap
-    ramp_time_s: 0.15 # seconds to ramp the commanded step from a standstill up to max_step_size/max_rot_step_size (and back down) instead of jumping straight to full speed at each waypoint transition; smaller = snappier but rougher, larger = smoother but mushier
-    position_tolerance: 0.003 # m, waypoint-reached threshold
-    rotation_tolerance: 0.02 # rad, waypoint-reached threshold
-    grasp_close_wait_s: 0.5 # dwell after closing gripper before lifting
-    release_open_wait_s: 0.3 # dwell after opening gripper before retreating
+    # Motion: every move follows a minimum-jerk (bell-shaped speed) profile.
+    # Transit arcs up to approach_height above the higher endpoint and ends
+    # align_height above the object; the rest is a slow force-stop descent.
+    approach_height: 0.16 # m, transit arc height above the higher of pick/place, and retreat height after release
+    align_height: 0.04 # m, where transit ends and the slow descent starts
+    transit_speed_range: [0.15, 0.30] # m/s, peak transit speed, resampled once per episode
+    descend_speed: 0.04 # m/s, peak speed of the final descent and the first lift off the table
+    rot_speed: 0.6 # rad/s, peak rotation speed
+    min_segment_s: 0.3 # s, shortest any single move may take
+    max_step_size: 0.02 # m per tick, safety clamp on each commanded delta (on top of robot.position_mode.max_pos_speed)
+    max_rot_step_size: 0.05 # rad per tick, safety clamp on each commanded rotation delta
+    tracking_lead_s: 0.05 # s, how far ahead on the profile each tick aims, to make up for the arm lagging its command
+    position_tolerance: 0.003 # m, a move is done once its profile ends and the arm is this close
+    rotation_tolerance: 0.02 # rad
+    settle_timeout_s: 1.5 # s after a profile ends to move on even if not within tolerance (logs a warning)
+
+    suction_lead_m: 0.005 # m above the object at which suction switches on during the descent
+    grasp_seal_s: 0.25 # s, hold at the object after contact so the suction seal forms
+    release_s: 0.25 # s, hold at the place point after switching suction off
 
     force_stop_enabled: True # if True, stop the downward pick/place move early on TCP force contact instead of servoing to the assumed depth
     contact_force_threshold: 10.0 # N, TCP force magnitude that counts as "touched the object"
-    force_stop_approach_step_size: 0.005 # m per tick, slower position cap used only while descending into pick/place so contact is caught with little overshoot (avoids tripping the arm's own protective stop)
-    force_stop_clearance_height: 0.02 # m, retreat straight up this far from wherever contact was actually detected, right after grasp/release, before continuing to the full lift/retreat waypoint
+    force_stop_clearance_height: 0.02 # m, slow straight-up lift right after grasping, before the transit arc
 
-    # Human-like imperfections (all disabled/no-op by default; enable to make
-    # scripted demonstrations look less mechanically perfect).
-    overshoot_enabled: True # if True, reach slightly past pick/place before correcting back
-    pick_overshoot_distance: 0.03 # m, max random horizontal overshoot at the pick point
-    place_overshoot_distance: 0.02 # m, max random horizontal overshoot at the place point
-    trajectory_curve_enabled: False # if True, bow the lift->pre_place transfer path instead of a straight line
-    trajectory_bow_range: 0.05 # m, max random perpendicular bow offset applied to the transfer path
-    trajectory_waypoints: 3 # number of intermediate waypoints sampled along the bowed transfer path
+    # Recovery demonstrations (recorded as phase PERTURB -> CORRECT; PERTURB
+    # frames are dropped at training time, see configs/phase_weights.yaml).
+    # Never used during scene resets.
+    misalign_prob: 0.25 # per approach (pick and place): end transit off target, start down, then correct
+    misalign_range: [0.015, 0.03] # m, horizontal misalignment
+    miss_grasp_prob: 0.1 # per pick: go down beside the object, suction on, lift, suction off, retry
+    miss_offset: 0.05 # m beside the object center; must exceed the object's half-width plus the cup radius
+    correct_speed: 0.06 # m/s, peak speed of the correcting move
 
   task:
     description: "put the sharpener in the blue box" # task description
