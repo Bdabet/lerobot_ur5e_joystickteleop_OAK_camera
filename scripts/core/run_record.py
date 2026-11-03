@@ -209,6 +209,9 @@ class RecordConfig:
 
         # storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
+        # Encode every episode's videos once at the end of the run instead of
+        # right after each episode (see EpisodeSaver).
+        self.encode_videos_at_end: bool = storage.get("encode_videos_at_end", False)
 
 
 def make_camera_configs(record_cfg: RecordConfig) -> dict:
@@ -411,6 +414,44 @@ def discard_unsaved_episode(dataset: LeRobotDataset | None) -> None:
         logging.info(f"====== [WARNING] Failed to discard unsaved episode buffer: {cleanup_error} ======")
 
 
+class EpisodeSaver:
+    """Saves finished episodes to the dataset. With storage.encode_videos_at_end
+    it only keeps each episode's buffer (its camera frames are already on disk
+    as images) and saves + encodes them all in flush(), at the end of the run,
+    instead of right after each episode."""
+
+    def __init__(self, dataset: LeRobotDataset, defer: bool):
+        self.dataset = dataset
+        self.defer = defer
+        self.pending: list[dict] = []
+
+    def save(self) -> None:
+        if not self.defer:
+            self.dataset.save_episode()
+            return
+        self.pending.append(self.dataset.episode_buffer)
+        self._start_next_buffer()
+
+    def clear_current(self) -> None:
+        """Discard the episode being recorded (keeps the pending ones)."""
+        self.dataset.clear_episode_buffer()
+        if self.defer:
+            self._start_next_buffer()
+
+    def flush(self) -> None:
+        if not self.pending:
+            return
+        logging.info(f"====== [INFO] Saving and encoding {len(self.pending)} episode(s)... ======")
+        while self.pending:
+            self.dataset.save_episode(episode_data=self.pending.pop(0))
+
+    def _start_next_buffer(self) -> None:
+        # Its images must not land in a pending episode's image folder.
+        self.dataset.episode_buffer = self.dataset.create_episode_buffer(
+            episode_index=self.dataset.meta.total_episodes + len(self.pending)
+        )
+
+
 def finalize_dataset_safely(dataset: LeRobotDataset | None) -> None:
     if dataset is None:
         return
@@ -507,6 +548,7 @@ def run_record(record_cfg: RecordConfig):
     record_loop_time_s = 0.0
     record_loop_count = 0
     dataset_info_updated = False
+    episode_saver = None
 
     try:
         dataset_name, data_version = generate_dataset_name(record_cfg)
@@ -593,6 +635,8 @@ def run_record(record_cfg: RecordConfig):
                 image_writer_threads=4,
             )
 
+        episode_saver = EpisodeSaver(dataset, defer=record_cfg.encode_videos_at_end)
+
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_mera_period
 
@@ -673,7 +717,7 @@ def run_record(record_cfg: RecordConfig):
                 logging.info("Re-recording episode")
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
-                dataset.clear_episode_buffer()
+                episode_saver.clear_current()
                 if record_cfg.mode == "auto_pick_place":
                     # The discarded episode still physically moved the objects;
                     # bring them back to their pick region before retrying.
@@ -706,7 +750,7 @@ def run_record(record_cfg: RecordConfig):
                     break
                 continue
 
-            dataset.save_episode()
+            episode_saver.save()
 
             # Reset the environment if not stopping or re-recording
             if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or events["rerecord_episode"]):
@@ -745,6 +789,7 @@ def run_record(record_cfg: RecordConfig):
         logging.info("Stop recording")
         robot.disconnect()
         teleop.disconnect()
+        episode_saver.flush()
         dataset.finalize()
 
         total_time_s = time_module.perf_counter() - record_start_time
@@ -806,10 +851,26 @@ def run_record(record_cfg: RecordConfig):
         if teleop is not None:
             teleop.disconnect()
         discard_unsaved_episode(dataset)
+        flush_ok = True
+        if episode_saver is not None:
+            # Episodes finished before the error are still good.
+            try:
+                episode_saver.flush()
+            except Exception as flush_error:
+                flush_ok = False
+                logging.info(f"====== [WARNING] Failed to save pending episodes: {flush_error} ======")
         finalize_dataset_safely(dataset)
         if dataset_name is not None:
             dataset_path = Path(HF_LEROBOT_HOME) / dataset_name
-            keep_dataset = handle_incomplete_dataset(dataset_path)
+            if flush_ok and dataset is not None and dataset.meta.total_episodes > 0:
+                # Only the episode in progress was lost; everything saved is intact.
+                logging.info(
+                    f"====== [KEEP] Run interrupted; kept {dataset.meta.total_episodes} saved episode(s) in "
+                    f"{dataset_path}, the unfinished episode was discarded. ======"
+                )
+                keep_dataset = True
+            else:
+                keep_dataset = handle_incomplete_dataset(dataset_path)
             if keep_dataset and data_version is not None and not dataset_info_updated:
                 update_dataset_info(record_cfg, dataset_name, data_version)
 

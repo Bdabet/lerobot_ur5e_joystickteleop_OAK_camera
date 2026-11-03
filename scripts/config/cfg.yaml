@@ -163,6 +163,7 @@ record:
   storage:
     data_root: "/mnt/ssd/lerobot_data" # root dir for datasets (and calibration); sets HF_LEROBOT_HOME. Empty/null = default ~/.cache/huggingface/lerobot. A HF_LEROBOT_HOME already set in the shell overrides this
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
+    encode_videos_at_end: False # save + encode all episodes once when the run ends (or stops/crashes) instead of after every episode; raw frames stay on disk as images until then
 
 replay:
   repo_id: *repo_id
