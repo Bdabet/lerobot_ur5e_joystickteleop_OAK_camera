@@ -403,7 +403,9 @@ def discard_unsaved_episode(dataset: LeRobotDataset | None) -> None:
         return
 
     try:
-        dataset.clear_episode_buffer(delete_images=len(dataset.meta.image_keys) > 0)
+        # camera_keys, not image_keys: the cameras are video features, which
+        # image_keys leaves out, so their frames would stay on disk.
+        dataset.clear_episode_buffer(delete_images=len(dataset.meta.camera_keys) > 0)
         logging.info("====== [INFO] Discarded unsaved episode buffer. ======")
     except Exception as cleanup_error:
         logging.info(f"====== [WARNING] Failed to discard unsaved episode buffer: {cleanup_error} ======")
