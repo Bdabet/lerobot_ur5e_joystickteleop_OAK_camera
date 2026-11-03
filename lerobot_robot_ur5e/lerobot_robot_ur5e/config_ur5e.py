@@ -42,8 +42,11 @@ class UR5eConfig(RobotConfig):
     force_stop_deceleration: float = 5.0
     payload_mass: float = 1.601
     payload_cog: list = field(default_factory=lambda: [0.011, -0.002, 0.052])
-    init_pose: list = field(default_factory=lambda: [0.614137, -0.074413, 0.122977, 3.106029, -0.009024, -1.636309])
-    init_pose_range: list = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    # Reset target as joint angles [base, shoulder, elbow, wrist1, wrist2, wrist3] in degrees
+    # (as shown on the teach pendant); reached with moveJ at joint_speed/joint_acceleration.
+    init_joints_deg: list | None = None
+    joint_speed: float = 0.5  # rad/s
+    joint_acceleration: float = 0.5  # rad/s^2
     reference_frame: str = "base"  # "base" or "tcp"
     control_space: str = "position"  # "position" or "force"
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

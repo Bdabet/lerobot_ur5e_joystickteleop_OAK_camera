@@ -13,7 +13,6 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
 from lerobot.robots.robot import Robot
 from .config_ur5e import UR5eConfig
-from .pose_utils import sample_pose_with_jitter
 from .pose_trajectory_interpolator import PoseTrajectoryInterpolator
 
 logger = logging.getLogger(__name__)
@@ -22,7 +21,7 @@ PAYLOAD_SETTLE_TIME_S = 0.25
 FT_ZERO_SETTLE_TIME_S = 0.50
 # If the interpolator's commanded pose drifts from the robot's actual pose by more
 # than this, the robot was moved through a path that bypassed the interpolator
-# (e.g. moveL() in reset_to_init_pose, or a protective-stop recovery) and it must
+# (e.g. moveJ() in reset_to_init_pose, or a protective-stop recovery) and it must
 # be resynced, or the next servoL target will be stale and cause a fast snap.
 POSE_INTERP_RESYNC_POS_M = 0.05
 POSE_INTERP_RESYNC_ROT_RAD = 0.1
@@ -367,7 +366,7 @@ class UR5e(Robot):
         """Reseed the pose interpolator from the robot's actual current pose if it
         has drifted too far from what the interpolator last commanded. This
         happens whenever the robot moves through a path that bypasses the
-        interpolator (moveL in reset_to_init_pose, a protective-stop recovery,
+        interpolator (moveJ in reset_to_init_pose, a protective-stop recovery,
         free-drive, etc.) and prevents the next servoL call from snapping back
         toward a stale commanded pose."""
         actual_pose = np.array(self._arm["rtde_r"].getActualTCPPose(), dtype=float)
@@ -585,23 +584,21 @@ class UR5e(Robot):
                 self.config.force_limit,
             )
 
-    def _sample_init_pose(self, init_pose: list[float], init_pose_range: list[float]) -> list[float]:
-        return sample_pose_with_jitter(init_pose, init_pose_range)
-
-    def reset_to_init_pose(
-        self,
-        init_pose: list[float] | None = None,
-        init_pose_range: list[float] | None = None,
-    ) -> None:
+    def reset_to_init_pose(self, init_joints_deg: list[float] | None = None) -> None:
+        """Move to the configured reset joint angles with moveJ. Joint targets are
+        unambiguous (always the same arm configuration) and moveJ interpolates in
+        joint space, so long resets from an arbitrary start don't whip the wrist the
+        way a Cartesian moveL can."""
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        target_pose = self._sample_init_pose(
-            init_pose if init_pose is not None else self.config.init_pose,
-            init_pose_range if init_pose_range is not None else self.config.init_pose_range,
-        )
+        if init_joints_deg is None:
+            init_joints_deg = self.config.init_joints_deg
+        if init_joints_deg is None or len(init_joints_deg) != 6:
+            raise ValueError(f"init_joints_deg must contain 6 joint angles in degrees, got {init_joints_deg}.")
+        target_q = np.deg2rad(np.asarray(init_joints_deg, dtype=float)).tolist()
 
-        logger.info("Resetting to initial TCP pose.")
+        logger.info("Resetting to initial joint angles (deg): %s", list(init_joints_deg))
         if self.config.debug:
             logger.info("Debug mode is enabled; skip robot reset motion.")
         else:
@@ -610,11 +607,18 @@ class UR5e(Robot):
                 if hasattr(self._arm["rtde_c"], "forceModeStop"):
                     self._arm["rtde_c"].forceModeStop()
             self._arm["rtde_c"].servoStop()
-            self._arm["rtde_c"].moveL(
-                target_pose,
-                self.config.speed,
-                self.config.acceleration,
+            self._arm["rtde_c"].moveJ(
+                target_q,
+                self.config.joint_speed,
+                self.config.joint_acceleration,
             )
+            # moveJ bypassed the servoL interpolator; reseed it so the first
+            # streamed command starts from here instead of a stale pose.
+            if self.config.control_space == "position":
+                self._pose_interp = PoseTrajectoryInterpolator(
+                    times=[time.monotonic()],
+                    poses=[self._arm["rtde_r"].getActualTCPPose()],
+                )
         payload_result = self._arm["rtde_c"].setPayload(
             self.config.payload_mass,
             self.config.payload_cog,

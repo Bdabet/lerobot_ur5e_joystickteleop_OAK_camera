@@ -138,12 +138,9 @@ class RecordConfig:
         self.gain: int = position_cfg.get("gain", 300)
         self.payload_mass: float = payload_cfg.get("mass", 1.601)
         self.payload_cog: list = payload_cfg.get("cog", [0.011, -0.002, 0.052])
-        self.init_pose: list[float] = robot["init_pose"]
-        legacy_init_pos_range = robot.get("init_pos_range", [0.0, 0.0, 0.0])
-        self.init_pose_range: list[float] = robot.get(
-            "init_pose_range",
-            [*legacy_init_pos_range, 0.0, 0.0, 0.0],
-        )
+        self.joint_speed: float = position_cfg.get("joint_speed", 0.5)
+        self.joint_acceleration: float = position_cfg.get("joint_acceleration", 0.5)
+        self.init_joints_deg: list[float] = robot["init_joints_deg"]
 
         # mode: "teleop" (default, human-driven) or "auto_pick_place" (scripted)
         self.mode: str = cfg.get("mode", "teleop")
@@ -458,8 +455,8 @@ def reset_to_init_pose(
     if events["stop_recording"]:
         return
 
-    logging.info("====== [RESET] Automatically resetting to configured initial TCP pose ======")
-    robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
+    logging.info("====== [RESET] Automatically resetting to configured initial joint angles ======")
+    robot.reset_to_init_pose(record_cfg.init_joints_deg)
 
 
 def run_scene_reset(
@@ -542,8 +539,9 @@ def run_record(record_cfg: RecordConfig):
             gain=record_cfg.gain,
             payload_mass=record_cfg.payload_mass,
             payload_cog=record_cfg.payload_cog,
-            init_pose=record_cfg.init_pose,
-            init_pose_range=record_cfg.init_pose_range,
+            init_joints_deg=record_cfg.init_joints_deg,
+            joint_speed=record_cfg.joint_speed,
+            joint_acceleration=record_cfg.joint_acceleration,
             reference_frame=record_cfg.reference_frame,
             control_frame_euler_deg=record_cfg.control_frame_euler_deg,
         )
@@ -601,7 +599,7 @@ def run_record(record_cfg: RecordConfig):
         teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
         robot.connect()
-        robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
+        robot.reset_to_init_pose(record_cfg.init_joints_deg)
 
         teleop.connect()
 
@@ -623,7 +621,7 @@ def run_record(record_cfg: RecordConfig):
                 robot_observation_processor,
             )
             
-            robot.reset_to_init_pose(record_cfg.init_pose, record_cfg.init_pose_range)
+            robot.reset_to_init_pose(record_cfg.init_joints_deg)
 
         if record_cfg.mode == "auto_pick_place":
             logging.info(
