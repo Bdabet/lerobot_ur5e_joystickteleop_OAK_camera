@@ -49,8 +49,8 @@ except Exception as e:
 ACTION_KEYS = ("delta_x", "delta_y", "delta_z", "delta_rx", "delta_ry", "delta_rz")
 
 # ---- joystick button/axis indices
-JOYSTICK_AXIS_Y = 0          # left stick left/right  -> delta_y
-JOYSTICK_AXIS_X = 1          # left stick up/down (inverted) -> delta_x
+JOYSTICK_AXIS_Y = 1          # left stick left/right  -> delta_y
+JOYSTICK_AXIS_X = 0          # left stick up/down (inverted) -> delta_x
 JOYSTICK_BUTTON_R1 = 5      # right bumper -> +delta_z
 JOYSTICK_BUTTON_L1 = 4       # left bumper  -> -delta_z
 X_BUTTON = 2                # X button (Xbox layout: A=0, B=1, X=2, Y=3, LB=4, RB=5)
