@@ -49,8 +49,8 @@ record:
       max_pos_speed: 0.5 # m/s, hard cap on commanded TCP linear speed (default 0.25); also caps auto_pick_place streaming
       max_rot_speed: 1.0 # rad/s, hard cap on commanded TCP rotation speed (default 0.5)
     payload:
-      mass: 1.601
-      cog: [0.011, -0.002, 0.052]
+      mass: 1.5
+      cog: [0.003, -0.021, 0.056]
 
   teleop:
     position_step_size: 0.006 # keyboard xyz target delta for position control
