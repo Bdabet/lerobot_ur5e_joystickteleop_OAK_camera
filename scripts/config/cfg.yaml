@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "tests/pick_place"
+  repo_id: &repo_id "plates/stacking"
   # repo_id: &repo_id "scylearning/pick_greencube_into_trashbin" 
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
@@ -88,28 +88,65 @@ record:
   auto_pick_place:
     object_load_hold_s: 3.0 # seconds to hold the gripper on at the init pose while the operator hands over each object
     manual_place_time_sec: 300 # max time (s) the operator has to jog each object down and release it during loading
+    # "auto": the robot puts every object back into pick_region between episodes.
+    # "manual": before each episode (including the first, instead of the
+    # loading above) arrange the objects by hand, press Enter, then jog the cup
+    # down onto each object and press the right arrow key to teach where it is.
+    # Works with either place_mode.
+    scene_reset: "auto" # "auto" or "manual"
 
     pick_region:
-      x_range: [0.4, 0.5]
-      y_range: [-0.55, -0.06]
-    pick_min_separation: 0.05 # m, min distance enforced between objects in the pick region
+      x_range: [0.09574162, 0.57866903]
+      y_range: [-0.53, -0.23]
+    pick_min_separation: 0.3 # m, was 0.05 for box, min distance enforced between objects in the pick region
+    pick_place_region_clearance: 0.0 # m, pick spots closer than this to place_region (object center to the region's nearest point) are rejected; 0 = just not inside it, null = no check. ~one object diameter keeps put-back objects from touching ones placed at its edge
     shuffle_pick_order: true # randomize which object is picked first each episode
 
     # Each episode's placement point per object is sampled fresh from within
     # place_region, and re-sampled if it lands within place_min_separation of
     # an object already placed earlier in the same episode (so objects spread
     # out instead of stacking).
+    # Either a box (x_range + y_range) or a point + randomization distance:
+    #   center: [x, y] and radius: r -> each episode samples a spot uniformly
+    #   within r meters of center (radius 0 = always exactly center).
+    # The same works for pick_region.
     place_region:
-      x_range: [0.14, 0.27]
-      y_range: [-0.418, -0.47]
-    place_min_separation: 0.05 # m, min distance enforced between placements in one episode
+      # x_range: [0.14, 0.27]
+      # y_range: [-0.418, -0.47]
+      center: [0.0452, -0.445] # with load_mode "stack": replaced at startup by the x/y of the hand-built stack you jog onto
+      radius: 0.015 # must be set gto zero if stack is only partially manipulated
+      exclusion_radius: 0.24 # m, pick spots (scene reset / stack unloading) within this distance of center are rejected; >= radius. = radius 0.015 + 2 x plate radius 0.10 + ~2.5 cm margin, so a put-back plate never touches the stack (overrides pick_place_region_clearance)
+    place_min_separation: 0.05 # m, min distance enforced between placements in one episode (scatter only)
     place_sampling_max_attempts: 200 # placement resample attempts before giving up
+
+    # place_mode "stack": one spot is sampled from place_region per episode and
+    # every object is stacked there by dropping it: the place motion stops at
+    # the fixed height stack_release_z and releases, so the arm never presses
+    # into the stack (fine for light objects like plastic plates). The scene
+    # reset then unstacks top-down: it approaches align_height above
+    # stack_release_z and descends slowly with suction on until force contact
+    # with the top object (requires force_stop_enabled).
+    place_mode: "stack" # "scatter" (separate spot per object) or "stack"
+    stack_release_z: 0.15 # m, base-frame TCP z where each stacked object is released; must clear the full stack plus the held object
+    stack_descend_speed: 0.03 # m/s, peak speed of the reset's unstacking descent (contact can happen mid-profile, so keep it slow)
+    # load_mode "per_object": hand over / teach each object separately (default).
+    # "stack": stack all objects anywhere by hand and only jog the cup onto the
+    # top one; the robot unstacks them into pick_region (with scene_reset
+    # "manual" this replaces each per-object teach too). At startup it asks
+    # how many objects are in the stack (n) and how many to pick off the top
+    # (k <= n); the other n - k stay as a base that episodes stack the k back
+    # onto. Each picked object's table height = stack top - (n - 1) *
+    # stack_plate_pitch; a bit too large is
+    # safe (the force-stop descent catches the table), too small drops plates
+    # from that much too high. Requires force_stop_enabled.
+    load_mode: "stack" # "per_object" or "stack"
+    stack_plate_pitch: 0.01 # m, height each object adds to a stack -- MEASURE: (stack of n height - one object height) / (n - 1)
 
     # Motion: every move follows a minimum-jerk (bell-shaped speed) profile.
     # Transit arcs up to approach_height above the higher endpoint and ends
     # align_height above the object; the rest is a slow force-stop descent.
-    approach_height: 0.16 # m, transit arc height above the higher of pick/place, and retreat height after release
-    align_height: 0.04 # m, where transit ends and the slow descent starts
+    approach_height: 0.14 #  m was 0.16 fro box , transit arc height above the higher of pick/place, and retreat height after release
+    align_height: 0.05 # m, where transit ends and the slow descent starts
     transit_speed_range: [0.15, 0.30] # m/s, peak transit speed, resampled once per episode
     descend_speed: 0.04 # m/s, peak speed of the final descent and the first lift off the table
     rot_speed: 0.6 # rad/s, peak rotation speed
@@ -117,11 +154,12 @@ record:
     max_step_size: 0.02 # m per tick, safety clamp on each commanded delta (on top of robot.position_mode.max_pos_speed)
     max_rot_step_size: 0.05 # rad per tick, safety clamp on each commanded rotation delta
     tracking_lead_s: 0.05 # s, how far ahead on the profile each tick aims, to make up for the arm lagging its command
-    position_tolerance: 0.003 # m, a move is done once its profile ends and the arm is this close
+    position_tolerance: 0.01 # was 0.003 m, a move is done once its profile ends and the arm is this close
     rotation_tolerance: 0.02 # rad
     settle_timeout_s: 1.5 # s after a profile ends to move on even if not within tolerance (logs a warning)
+    align_settle_timeout_s: 5.0 # s, same but for the move that ends right above an object: the descent only starts once the arm is really above it (straight down, not at an angle)
 
-    suction_lead_m: 0.005 # m above the object at which suction switches on during the descent
+    suction_lead_m: 0.003 # m above the object at which suction switches on during the descent
     grasp_seal_s: 0.25 # s, hold at the object after contact so the suction seal forms
     release_s: 0.25 # s, hold at the place point after switching suction off
     end_hold_s: 1.0 # s, hold still above the last placed object before the episode ends (a clear 'done' pattern); 0 disables
@@ -136,16 +174,16 @@ record:
     misalign_prob: 0.25 # per approach (pick and place): end transit off target, start down, then correct
     misalign_range: [0.015, 0.03] # m, horizontal misalignment
     miss_grasp_prob: 0.1 # per pick: go down beside the object, suction on, lift, suction off, retry
-    miss_offset: 0.05 # m beside the object center; must exceed the object's half-width plus the cup radius
+    miss_offset: 0.13 # m beside the object center; must exceed the object's half-width (plates: 0.10) plus the cup radius, or the "missed" grasp lands on the plate
     correct_speed: 0.06 # m/s, peak speed of the correcting move
 
   task:
-    description: "put the sharpener in the blue box" # task description
-    num_episodes: 15 # number of episodes to record
+    description: "place the tupperware in the position marked with the blue square" # task description
+    num_episodes: 10 # number of episodes to record
     display: True # Whether to display the data during recording
     resume: True
     # resume_dataset: scylearning/extinguish_alcohol_lamp_20260801_v01 # dataset to resume from if resume is True
-    resume_dataset: tests/pick_place_20260908_v03
+    resume_dataset: plates/stacking_20261029_v13
 
   time:
     episode_time_sec: 600 # max time per episode in seconds
