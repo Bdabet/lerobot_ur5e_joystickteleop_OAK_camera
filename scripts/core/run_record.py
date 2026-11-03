@@ -6,7 +6,7 @@ from typing import Dict, Any
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
 from scripts.core.record_loop import record_loop
 from scripts.core.auto_pickplace import AutoPickPlaceConfig, AutoPickPlaceController
-from scripts.core.object_loading import load_objects_into_regions
+from scripts.core.object_loading import load_objects_from_stack, load_objects_into_regions, teach_scene
 from lerobot_robot_ur5e import UR5eConfig, UR5e
 from lerobot_teleoperator_ur5e import UR5eTeleopConfig, UR5eTeleop
 from lerobot.processor import make_default_processors
@@ -553,6 +553,8 @@ def run_record(record_cfg: RecordConfig):
     record_loop_time_s = 0.0
     record_loop_count = 0
     dataset_info_updated = False
+    num_objects = None
+    stack_size = None
     jog_teleop = None
     episode_saver = None
 
@@ -667,7 +669,7 @@ def run_record(record_cfg: RecordConfig):
             # value could).
             teleop.set_canonical_orientation_from_current_pose()
             jog_teleop = build_manual_teleop(record_cfg)
-            load_objects_into_regions(
+            scene_args = (
                 record_cfg,
                 robot,
                 teleop,
@@ -677,6 +679,12 @@ def run_record(record_cfg: RecordConfig):
                 robot_action_processor,
                 robot_observation_processor,
             )
+            if record_cfg.auto_pick_place.load_mode == "stack":
+                num_objects, stack_size = load_objects_from_stack(*scene_args)
+            elif record_cfg.auto_pick_place.scene_reset == "manual":
+                num_objects = teach_scene(*scene_args)
+            else:
+                load_objects_into_regions(*scene_args)
             
             robot.reset_to_init_pose(record_cfg.init_joints_deg)
 
@@ -685,6 +693,29 @@ def run_record(record_cfg: RecordConfig):
                 "====== [INFO] auto_pick_place mode: episodes run automatically back-to-back. "
                 "Press Enter at any time to stop after the current episode finishes. ======"
             )
+
+        def prepare_next_scene() -> None:
+            # scene_reset "manual": the operator rearranges and re-teaches the
+            # objects (load_mode "stack": just the stack top, the robot
+            # unstacks); "auto": the robot puts them back itself.
+            nonlocal num_objects, stack_size
+            if record_cfg.auto_pick_place.scene_reset == "manual":
+                if record_cfg.auto_pick_place.load_mode == "stack":
+                    num_objects, stack_size = load_objects_from_stack(
+                        *scene_args, num_objects=num_objects, stack_size=stack_size
+                    )
+                else:
+                    num_objects = teach_scene(*scene_args, num_objects=num_objects)
+            else:
+                run_scene_reset(
+                    record_cfg,
+                    robot,
+                    teleop,
+                    events,
+                    teleop_action_processor,
+                    robot_action_processor,
+                    robot_observation_processor,
+                )
 
         episode_idx = 0
         record_start_time = time_module.perf_counter()
@@ -727,15 +758,7 @@ def run_record(record_cfg: RecordConfig):
                 if record_cfg.mode == "auto_pick_place":
                     # The discarded episode still physically moved the objects;
                     # bring them back to their pick region before retrying.
-                    run_scene_reset(
-                        record_cfg,
-                        robot,
-                        teleop,
-                        events,
-                        teleop_action_processor,
-                        robot_action_processor,
-                        robot_observation_processor,
-                    )
+                    prepare_next_scene()
                 reset_to_init_pose(
                     record_cfg,
                     robot,
@@ -761,15 +784,7 @@ def run_record(record_cfg: RecordConfig):
             # Reset the environment if not stopping or re-recording
             if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or events["rerecord_episode"]):
                 if record_cfg.mode == "auto_pick_place":
-                    run_scene_reset(
-                        record_cfg,
-                        robot,
-                        teleop,
-                        events,
-                        teleop_action_processor,
-                        robot_action_processor,
-                        robot_observation_processor,
-                    )
+                    prepare_next_scene()
                     if check_graceful_stop_requested():
                         logging.info(
                             "====== [INFO] Stop requested; finishing setup, then stopping. ======"
