@@ -53,10 +53,10 @@ record:
       cog: [0.003, -0.021, 0.056]
 
   teleop:
-    position_step_size: 0.006 # keyboard xyz target delta for position control
+    position_step_size: 0.01 # keyboard xyz target delta for position control
     force_step_size: 0.04 # keyboard xyz target delta for force control
     force_fine_step_size: 0.015 # keyboard xyz target delta for force control after / toggle
-    position_rot_step_size: 0.02 # keyboard euler angle target delta for position control [rx, ry, rz]
+    position_rot_step_size: 0.05 # keyboard euler angle target delta for position control [rx, ry, rz]
     force_rot_step_size: 0.05 # keyboard euler angle target delta for force control [rx, ry, rz]
     force_fine_rot_step_size: 0.045 # keyboard euler angle target delta for force control after / toggle [rx, ry, rz]
     control_frame_euler_deg: *control_frame_euler_deg
