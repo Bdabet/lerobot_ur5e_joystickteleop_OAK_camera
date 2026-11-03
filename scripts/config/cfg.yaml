@@ -159,6 +159,7 @@ record:
     dummy_value: 0 # dummy RGB image intensity in [0, 255]
 
   storage:
+    data_root: "/mnt/ssd/lerobot_data" # root dir for datasets (and calibration); sets HF_LEROBOT_HOME. Empty/null = default ~/.cache/huggingface/lerobot. A HF_LEROBOT_HOME already set in the shell overrides this
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
 
 replay:
