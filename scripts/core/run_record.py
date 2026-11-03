@@ -414,6 +414,11 @@ def discard_unsaved_episode(dataset: LeRobotDataset | None) -> None:
         logging.info(f"====== [WARNING] Failed to discard unsaved episode buffer: {cleanup_error} ======")
 
 
+def disconnect_if_connected(device) -> None:
+    if device is not None and device.is_connected:
+        device.disconnect()
+
+
 class EpisodeSaver:
     """Saves finished episodes to the dataset. With storage.encode_videos_at_end
     it only keeps each episode's buffer (its camera frames are already on disk
@@ -548,6 +553,7 @@ def run_record(record_cfg: RecordConfig):
     record_loop_time_s = 0.0
     record_loop_count = 0
     dataset_info_updated = False
+    jog_teleop = None
     episode_saver = None
 
     try:
@@ -789,6 +795,7 @@ def run_record(record_cfg: RecordConfig):
         logging.info("Stop recording")
         robot.disconnect()
         teleop.disconnect()
+        disconnect_if_connected(jog_teleop)
         episode_saver.flush()
         dataset.finalize()
 
@@ -850,6 +857,7 @@ def run_record(record_cfg: RecordConfig):
             robot.disconnect()
         if teleop is not None:
             teleop.disconnect()
+        disconnect_if_connected(jog_teleop)
         discard_unsaved_episode(dataset)
         flush_ok = True
         if episode_saver is not None:
