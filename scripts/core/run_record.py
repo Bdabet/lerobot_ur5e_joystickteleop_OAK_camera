@@ -137,6 +137,8 @@ class RecordConfig:
         self.servo_time: float = position_cfg.get("servo_time", 0.1)
         self.lookahead_time: float = position_cfg.get("lookahead_time", 0.1)
         self.gain: int = position_cfg.get("gain", 300)
+        self.max_pos_speed: float = position_cfg.get("max_pos_speed", 0.25)
+        self.max_rot_speed: float = position_cfg.get("max_rot_speed", 0.5)
         self.payload_mass: float = payload_cfg.get("mass", 1.601)
         self.payload_cog: list = payload_cfg.get("cog", [0.011, -0.002, 0.052])
         self.joint_speed: float = position_cfg.get("joint_speed", 0.5)
@@ -538,6 +540,8 @@ def run_record(record_cfg: RecordConfig):
             servo_time=record_cfg.servo_time,
             lookahead_time=record_cfg.lookahead_time,
             gain=record_cfg.gain,
+            max_pos_speed=record_cfg.max_pos_speed,
+            max_rot_speed=record_cfg.max_rot_speed,
             payload_mass=record_cfg.payload_mass,
             payload_cog=record_cfg.payload_cog,
             init_joints_deg=record_cfg.init_joints_deg,
