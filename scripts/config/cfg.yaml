@@ -4,7 +4,7 @@ record:
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   user_notes: "init_pose: [0.392232, 0.104898, 0.355162, -3.14, 0.0, -1.57]; init_pose_range: [0.02, 0.02, 0.02, 0.0, 0.0, 0.0]; force_step_size: 0.04; force_fine_step_size: 0.015; force_rot_step_size: 0.05; force_fine_rot_step_size: 0.045; gripper_force: 20; gripper_speed: 100; description: 'Extinguish the alcohol lamp'" # any additional notes about the dataset
-  fps: 15 # dataset and camera frame rate
+  fps: 30 # dataset and camera frame rate
 
   mode: "auto_pick_place" # "teleop" (human-driven, default) or "auto_pick_place" (scripted, see auto_pick_place below)
 
@@ -43,7 +43,7 @@ record:
       acceleration: 0.2 # passed to servoL but ignored by it
       joint_speed: 0.5 # rad/s, peak joint speed of the moveJ reset to init_joints_deg
       joint_acceleration: 0.5 # rad/s^2, joint acceleration of the moveJ reset; lower = gentler start/stop
-      servo_time: 0.05 # lowered from 0.1 to better match the ~0.067s control period at fps=15; was making servoL perpetually chase a stale target
+      servo_time: 0.025 # scaled down from 0.05 to match the ~0.033s control period at fps=30 (was 0.05 for the ~0.067s period at fps=15); keep below the control period or servoL will chase a stale target
       lookahead_time: 0.1
       gain: 300
       max_pos_speed: 0.5 # m/s, hard cap on commanded TCP linear speed (default 0.25); also caps auto_pick_place streaming
