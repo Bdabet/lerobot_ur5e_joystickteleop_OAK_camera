@@ -37,7 +37,14 @@ def record_loop(
         loop_start = time.perf_counter()
         if events["exit_early"]:
             events["exit_early"] = False
-            break
+            # Esc sets stop_recording + exit_early. For a scripted controller
+            # (auto_pick_place) that's mid-sequence, don't cut the sequence
+            # short - that would abort the episode after the current object.
+            # Keep stop_recording set and let it finish; the controller's own
+            # done signal ends the loop and the run stops right after.
+            stop_only = events["stop_recording"] and not events["rerecord_episode"]
+            if not (stop_only and getattr(teleop, "episode_complete", True) is False):
+                break
 
         observation = robot.get_observation()
         processed_observation = robot_observation_processor(observation)

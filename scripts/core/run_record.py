@@ -59,8 +59,9 @@ def check_graceful_stop_requested() -> bool:
 
     Used in auto_pick_place mode to let the operator request a stop at any time
     without blocking (unlike wait_for_enter) and without interrupting the
-    currently running episode (unlike the Esc/q keyboard control, which sets
-    exit_early too and aborts immediately). The keystroke is buffered by the OS
+    currently running episode. Esc does the same in auto_pick_place (record_loop
+    lets the scripted sequence finish instead of aborting on exit_early). The
+    keystroke is buffered by the OS
     until read, so it's detected here even if pressed mid-episode.
     """
     requested = False
