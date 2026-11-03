@@ -774,7 +774,11 @@ def run_record(record_cfg: RecordConfig):
             dataset.push_to_hub()
 
     except (Exception, KeyboardInterrupt) as e:
-        logging.info(f"====== [ERROR] {e} ======" if isinstance(e, Exception) else "\n====== [INFO] Ctrl+C detected ======")
+        if isinstance(e, Exception):
+            # With traceback: the encoding output that follows buries a bare message.
+            logging.exception(f"====== [ERROR] {type(e).__name__}: {e} ======")
+        else:
+            logging.info("\n====== [INFO] Ctrl+C detected ======")
         if record_start_time is not None:
             total_time_s = time_module.perf_counter() - record_start_time
             reset_time_s = max(0.0, total_time_s - record_loop_time_s)
