@@ -40,17 +40,58 @@ logger = logging.getLogger(__name__)
 
 
 class Region:
-    """An x/y bounding box (meters, robot base frame) that pick/place
-    positions are sampled uniformly from. Orientation is not configured here -
-    every sampled pose uses whatever orientation the robot actually has at
-    robot.init_pose (see AutoPickPlaceController.set_canonical_orientation_
-    from_current_pose()), so it can never drift from init_pose."""
+    """An x/y area (meters, robot base frame) that pick/place positions are
+    sampled uniformly from: either a bounding box (x_range + y_range) or a
+    disc (center [x, y] + radius; radius 0 always gives exactly center).
+    Orientation is not configured here - every sampled pose uses whatever
+    orientation the robot actually has at robot.init_pose (see
+    AutoPickPlaceController.set_canonical_orientation_from_current_pose()),
+    so it can never drift from init_pose."""
 
     def __init__(self, cfg: dict[str, Any], name: str):
-        if "x_range" not in cfg or "y_range" not in cfg:
-            raise ValueError(f"auto_pick_place.{name} requires x_range and y_range.")
-        self.x_range: tuple[float, float] = tuple(float(v) for v in cfg["x_range"])
-        self.y_range: tuple[float, float] = tuple(float(v) for v in cfg["y_range"])
+        self.center: tuple[float, float] | None = None
+        self.radius = 0.0
+        # place_region only: pick spots within this distance of center are
+        # rejected (overrides pick_place_region_clearance); >= radius.
+        self.exclusion_radius: float | None = None
+        if "center" in cfg:
+            if "x_range" in cfg or "y_range" in cfg:
+                raise ValueError(f"auto_pick_place.{name}: use either center + radius or x_range + y_range, not both.")
+            self.center = tuple(float(v) for v in cfg["center"])
+            if len(self.center) != 2:
+                raise ValueError(f"auto_pick_place.{name}.center must be [x, y].")
+            self.radius = float(cfg.get("radius", 0.0))
+            if self.radius < 0.0:
+                raise ValueError(f"auto_pick_place.{name}.radius must be >= 0.")
+            if cfg.get("exclusion_radius") is not None:
+                self.exclusion_radius = float(cfg["exclusion_radius"])
+                if self.exclusion_radius < self.radius:
+                    raise ValueError(f"auto_pick_place.{name}.exclusion_radius must be >= its radius.")
+        elif "x_range" not in cfg or "y_range" not in cfg:
+            raise ValueError(f"auto_pick_place.{name} requires x_range and y_range, or center (+ radius).")
+        else:
+            self.x_range: tuple[float, float] = tuple(float(v) for v in cfg["x_range"])
+            self.y_range: tuple[float, float] = tuple(float(v) for v in cfg["y_range"])
+
+    def distance_to(self, xy) -> float:
+        """Distance (m) from an x/y point to the nearest point of the region;
+        0 if it's inside."""
+        if self.center is not None:
+            return max(0.0, float(np.hypot(xy[0] - self.center[0], xy[1] - self.center[1])) - self.radius)
+        dx = max(min(self.x_range) - xy[0], 0.0, xy[0] - max(self.x_range))
+        dy = max(min(self.y_range) - xy[1], 0.0, xy[1] - max(self.y_range))
+        return float(np.hypot(dx, dy))
+
+    def sample_xy(self) -> tuple[float, float]:
+        if self.center is not None:
+            # sqrt keeps the density uniform over the disc's area.
+            r = self.radius * np.sqrt(np.random.uniform(0.0, 1.0))
+            angle = np.random.uniform(0.0, 2.0 * np.pi)
+            return self.center[0] + r * float(np.cos(angle)), self.center[1] + r * float(np.sin(angle))
+        return (
+            float(np.random.uniform(self.x_range[0], self.x_range[1])),
+            float(np.random.uniform(self.y_range[0], self.y_range[1])),
+        )
 
 
 class AutoPickPlaceConfig:
@@ -64,6 +105,15 @@ class AutoPickPlaceConfig:
         # Max time (seconds) the operator has to jog each object down onto the
         # table and release it during loading.
         self.manual_place_time_sec: float = cfg.get("manual_place_time_sec", 300)
+
+        # scene_reset "auto" picks every object back into pick_region between
+        # episodes. "manual" leaves it to the operator: before each episode
+        # (including the first, in place of object loading) they arrange the
+        # objects by hand, then jog the cup down onto each one to teach where
+        # it is (see object_loading.teach_scene()).
+        self.scene_reset: str = cfg.get("scene_reset", "auto")
+        if self.scene_reset not in ("auto", "manual"):
+            raise ValueError(f"auto_pick_place.scene_reset must be 'auto' or 'manual', got {self.scene_reset!r}.")
 
         # Transit between objects arcs up to approach_height above the higher
         # of its two endpoints, and ends align_height above the object, where
@@ -90,6 +140,11 @@ class AutoPickPlaceConfig:
         self.position_tolerance: float = cfg.get("position_tolerance", 0.003)
         self.rotation_tolerance: float = cfg.get("rotation_tolerance", 0.02)
         self.settle_timeout_s: float = cfg.get("settle_timeout_s", 1.5)
+        # The move that ends above an object (right before the descent onto
+        # it) waits up to this long instead, so a lagging arm reaches the spot
+        # above the object and the descent goes straight down, instead of
+        # coming in at an angle and touching down (force stop) off target.
+        self.align_settle_timeout_s: float = cfg.get("align_settle_timeout_s", 5.0)
         # If get_action() hasn't been called for longer than this (s) - the
         # loop driving it was interrupted, e.g. Esc mid scene reset, and a
         # later loop picks the same segments back up - the current segment
@@ -137,8 +192,55 @@ class AutoPickPlaceConfig:
 
         self.shuffle_pick_order: bool = cfg.get("shuffle_pick_order", True)
         self.pick_min_separation: float = cfg.get("pick_min_separation", 0.05)
+        # Pick spots (scene reset) closer than this to place_region - measured
+        # from the object's center to the region's nearest point, 0 = only
+        # spots inside it - are rejected, so pick_region may overlap
+        # place_region without objects being put back where the next episode
+        # places (or stacks) them. null disables the check.
+        self.pick_place_region_clearance: float | None = cfg.get("pick_place_region_clearance", 0.0)
         self.place_min_separation: float = cfg.get("place_min_separation", 0.05)
         self.place_sampling_max_attempts: int = cfg.get("place_sampling_max_attempts", 200)
+
+        # place_mode "scatter" samples a separate spot in place_region per
+        # object. "stack" samples one spot per episode and stacks every object
+        # there by dropping it: the place motion stops at the fixed height
+        # stack_release_z (base frame, TCP z) above the stack and releases, so
+        # it never presses into the stack. stack_release_z must clear the
+        # tallest stack plus one object. Since the plates' resting heights are
+        # then unknown, the scene reset unstacks top-down by approaching
+        # from stack_release_z and descending at stack_descend_speed (suction
+        # already on) until force contact with the top object.
+        self.place_mode: str = cfg.get("place_mode", "scatter")
+        if self.place_mode not in ("scatter", "stack"):
+            raise ValueError(f"auto_pick_place.place_mode must be 'scatter' or 'stack', got {self.place_mode!r}.")
+        self.stack_release_z: float | None = cfg.get("stack_release_z")
+        # load_mode "per_object" hands over / teaches each object separately.
+        # "stack": the operator stacks all objects anywhere and only jogs the
+        # cup onto the top one; the robot then unstacks them top-down (force
+        # contact) into pick_region. Each object's table height is derived as
+        # top - (n - 1) * stack_plate_pitch (the height each object adds to a
+        # stack); too large is safe, the force-stop descent catches the table.
+        self.load_mode: str = cfg.get("load_mode", "per_object")
+        if self.load_mode not in ("per_object", "stack"):
+            raise ValueError(f"auto_pick_place.load_mode must be 'per_object' or 'stack', got {self.load_mode!r}.")
+        self.stack_plate_pitch: float | None = cfg.get("stack_plate_pitch")
+        if self.load_mode == "stack":
+            if self.stack_plate_pitch is None or self.stack_plate_pitch < 0.0:
+                raise ValueError("auto_pick_place.load_mode 'stack' requires stack_plate_pitch >= 0.")
+            if not cfg.get("force_stop_enabled", False):
+                raise ValueError(
+                    "auto_pick_place.load_mode 'stack' requires force_stop_enabled: unstacking finds each "
+                    "object by force contact."
+                )
+        self.stack_descend_speed: float = cfg.get("stack_descend_speed", self.descend_speed)
+        if self.place_mode == "stack":
+            if self.stack_release_z is None:
+                raise ValueError("auto_pick_place.place_mode 'stack' requires stack_release_z.")
+            if self.scene_reset == "auto" and not self.force_stop_enabled:
+                raise ValueError(
+                    "auto_pick_place.place_mode 'stack' with scene_reset 'auto' requires force_stop_enabled: "
+                    "the scene reset finds each stacked object by force contact."
+                )
 
 
 class Phase(IntEnum):
@@ -166,7 +268,9 @@ class Segment:
     robot when the segment begins (so a move that follows an early force-stop
     contact starts from wherever contact actually happened); the end pose is
     either absolute (position/rotvec) or relative to that start (offset), and
-    a segment with neither is a hold in place for duration_s."""
+    a segment with neither is a hold in place for duration_s. A NaN in
+    position keeps that coordinate where the arm is when the segment starts
+    (e.g. [nan, nan, z] goes straight up or down to z)."""
 
     name: str
     phase: Phase
@@ -178,6 +282,7 @@ class Segment:
     duration_s: float | None = None  # fixed duration, for holds
     cruise_z: float | None = None  # if set, follow a cubic Bezier lifted to about this height
     force_stop: bool = False  # TCP-force contact ends this segment (and any directly following force_stop ones)
+    settle_timeout_s: float | None = None  # overrides config.settle_timeout_s
 
 
 # Peak/average velocity ratio of the minimum-jerk profile: a move of length d
@@ -207,10 +312,9 @@ class _ActiveSegment:
 
 def _sample_region_position(region: Region, height: float, canonical_rotvec: np.ndarray) -> list[float]:
     """A random pose [x, y, z, rx, ry, rz] (rotvec) with x/y uniform over the
-    region's bounding box, z fixed at height, and the canonical orientation
-    (whatever the robot's actual orientation is at robot.init_pose)."""
-    x = float(np.random.uniform(region.x_range[0], region.x_range[1]))
-    y = float(np.random.uniform(region.y_range[0], region.y_range[1]))
+    region, z fixed at height, and the canonical orientation (whatever the
+    robot's actual orientation is at robot.init_pose)."""
+    x, y = region.sample_xy()
     return [x, y, float(height), *canonical_rotvec.tolist()]
 
 
@@ -253,10 +357,14 @@ class AutoPickPlaceController:
         # scene reset), so the next episode/step picks it up from where it
         # really is instead of a fresh, independently-sampled guess.
         self._object_positions: dict[int, list[float]] = {}
-        # (object_index, actual_place_pose) per object from the most recently
-        # built episode, used by build_scene_reset_waypoints() to bring objects
-        # back from their goal position to a fresh spot in pick_region.
-        self._last_placements: list[tuple[int, list[float]]] = []
+        # Object indices in placement order from the most recently built
+        # episode, used by build_scene_reset_waypoints() to bring objects back
+        # from their goal position (read from _object_positions) to a fresh
+        # spot in pick_region.
+        self._last_placements: list[int] = []
+        # Set once register_loaded_stack() has moved place_region's center
+        # onto the first hand-built stack.
+        self._place_center_from_stack = False
         # The single orientation (rotvec) used for every pick/place/loaded-
         # object pose, captured live from the robot at robot.init_pose (see
         # set_canonical_orientation_from_current_pose()) so it's always
@@ -313,9 +421,11 @@ class AutoPickPlaceController:
         self._set_segments(self._build_episode_segments())
         self._last_gripper = 0.0
 
-    def build_scene_reset_waypoints(self) -> bool:
+    def build_scene_reset_waypoints(self, stack_top_z: float | None = None) -> bool:
         """Build a segment sequence that returns each object from where the last
         episode placed it to a freshly randomized position inside pick_region.
+        Objects on a stack (place_mode "stack", or stack_top_z given, the
+        known z of its top) are taken off top-down by force contact.
 
         Intended to be run through record_loop with dataset=None (not recorded as
         a demonstration) between episodes, so the scene is ready for the next
@@ -326,19 +436,26 @@ class AutoPickPlaceController:
             return False
 
         segments: list[Segment] = []
-        reset_positions: list[np.ndarray] = []
         # Not recorded, so no need for speed variety - just go briskly.
         transit_speed = self.config.transit_speed_range[1]
-        for i, (object_idx, placed_pose) in enumerate(self._last_placements, start=1):
-            height = self._object_heights[object_idx]
-            reset_target = self._sample_region_pose(
-                self.config.pick_region, height, reset_positions, self.config.pick_min_separation
-            )
-            reset_positions.append(np.array(reset_target[:3], dtype=float))
+        # A stack has to come apart top-down, i.e. in reverse placement order.
+        reset_order = self._last_placements[::-1] if self.config.place_mode == "stack" else self._last_placements
+        if stack_top_z is None and self.config.place_mode == "stack":
+            stack_top_z = self.config.stack_release_z
+        reset_targets = self._plan_pick_poses([self._object_heights[object_idx] for object_idx in reset_order])
+        for i, (object_idx, reset_target) in enumerate(zip(reset_order, reset_targets, strict=True), start=1):
+            placed_pose = self._object_positions[object_idx]
             self._object_positions[object_idx] = reset_target
             segments.extend(
                 self._pick_place_block(
-                    i, placed_pose, reset_target, transit_speed, name_prefix="reset_", allow_recovery=False
+                    i,
+                    placed_pose,
+                    reset_target,
+                    transit_speed,
+                    name_prefix="reset_",
+                    allow_recovery=False,
+                    straight=True,
+                    source_stack_top_z=stack_top_z,
                 )
             )
             logger.info(
@@ -404,7 +521,10 @@ class AutoPickPlaceController:
                     np.linalg.norm((self._active.slerp([1.0])[0] * current_rotation.inv()).as_rotvec())
                 )
                 settled = pos_error <= self.config.position_tolerance and rot_error <= self.config.rotation_tolerance
-                timed_out = elapsed >= self._active.duration_s + self.config.settle_timeout_s
+                settle_timeout_s = (
+                    self.config.settle_timeout_s if segment.settle_timeout_s is None else segment.settle_timeout_s
+                )
+                timed_out = elapsed >= self._active.duration_s + settle_timeout_s
                 if settled or timed_out:
                     if not settled:
                         logger.warning(
@@ -523,6 +643,55 @@ class AutoPickPlaceController:
         self._object_heights.append(height)
         self._object_positions[object_idx] = placed_pose
 
+    def register_loaded_stack(self, top_pose: list[float], num_objects: int, stack_size: int | None = None) -> float:
+        """load_mode "stack": register the top num_objects of a stack_size-high
+        stack (default: all of it) at top_pose (the cup on the top object,
+        canonicalized), as if an episode had just stacked them there, so
+        build_scene_reset_waypoints(stack_top_z) unstacks them into
+        pick_region. The other stack_size - num_objects stay as the base the
+        episodes stack back onto. Returns the stack's top z.
+
+        The first call also moves place_region's center to the stack's x/y
+        (radius and exclusion_radius unchanged), so episodes rebuild the stack
+        where the operator first built it. Later calls (scene_reset "manual")
+        keep that center."""
+        place_region = self.config.place_region
+        if not self._place_center_from_stack:
+            if place_region.center is None:
+                logger.warning(
+                    "====== [STACK] place_region is a box (x_range/y_range), not center + radius; "
+                    "keeping it instead of centering it on the stack ======"
+                )
+            else:
+                place_region.center = (float(top_pose[0]), float(top_pose[1]))
+                logger.info(
+                    "====== [STACK] place_region center set to the stack position %s (radius %.4f) ======",
+                    [round(v, 4) for v in place_region.center],
+                    place_region.radius,
+                )
+            self._place_center_from_stack = True
+
+        if stack_size is None:
+            stack_size = num_objects
+        if not 0 < num_objects <= stack_size:
+            raise ValueError(f"Can't pick {num_objects} object(s) off a stack of {stack_size}.")
+        top_z = float(top_pose[2])
+        # Every object is picked off into pick_region, i.e. ends up on the
+        # table: stack_size - 1 pitches below the top, base or no base.
+        table_z = top_z - (stack_size - 1) * self.config.stack_plate_pitch
+        self.clear_loaded_objects()
+        for _ in range(num_objects):
+            self.register_loaded_object([top_pose[0], top_pose[1], table_z, *top_pose[3:]], table_z)
+        self._last_placements = list(range(num_objects))
+        return top_z
+
+    def clear_loaded_objects(self) -> None:
+        """Forget every registered object, so a manually prepared scene can be
+        registered from scratch (scene_reset "manual")."""
+        self._object_heights = []
+        self._object_positions = {}
+        self._last_placements = []
+
     # ======= internals =======
 
     def _set_segments(self, segments: list[Segment]) -> None:
@@ -541,6 +710,7 @@ class AutoPickPlaceController:
         start_position = current_position.copy()
         if segment.position is not None:
             end_position = np.array(segment.position, dtype=float)
+            end_position = np.where(np.isnan(end_position), start_position, end_position)
         elif segment.offset is not None:
             end_position = start_position + segment.offset
         else:
@@ -612,8 +782,15 @@ class AutoPickPlaceController:
         transit_speed = float(np.random.uniform(*self.config.transit_speed_range))
         logger.info("====== [AUTO] Episode transit speed: %.3f m/s ======", transit_speed)
 
+        stacking = self.config.place_mode == "stack"
+        # Stacking: one spot for the whole episode, every object goes on top.
+        stack_xy = None
+        if stacking:
+            stack_xy = _sample_region_position(self.config.place_region, 0.0, self._canonical_rotvec)[:2]
+            logger.info("====== [AUTO] Episode stack position: %s ======", [round(v, 4) for v in stack_xy])
+
         placed_positions: list[np.ndarray] = []
-        placements: list[tuple[int, list[float]]] = []
+        placements: list[int] = []
         segments: list[Segment] = []
 
         for i, object_idx in enumerate(object_order, start=1):
@@ -622,14 +799,44 @@ class AutoPickPlaceController:
             pick_pose = self._object_positions[object_idx]
 
             height = self._object_heights[object_idx]
-            place_sampled = self._sample_region_pose(
-                self.config.place_region, height, placed_positions, self.config.place_min_separation
-            )
+            place_descend_speed = None
+            if stacking:
+                # Released (dropped) at stack_release_z, above the stack.
+                release_z = self.config.stack_release_z
+                if release_z <= height:
+                    # Misconfigured (at or below the table): don't abort, set
+                    # it down instead - aim for its table height and descend
+                    # slowly, so the force stop catches the stack (or table)
+                    # gently and it's released wherever it touches.
+                    logger.warning(
+                        "====== [AUTO] stack_release_z=%.4f is not above object %d's table height %.4f; "
+                        "setting it down with a slow force-stop descent instead of dropping it ======",
+                        release_z,
+                        object_idx,
+                        height,
+                    )
+                    release_z = height
+                    place_descend_speed = self.config.stack_descend_speed
+                place_sampled = [*stack_xy, release_z, *self._canonical_rotvec.tolist()]
+            else:
+                place_sampled = self._sample_region_pose(
+                    self.config.place_region, height, placed_positions, self.config.place_min_separation
+                )
             placed_positions.append(np.array(place_sampled[:3], dtype=float))
-            placements.append((object_idx, place_sampled))
-            self._object_positions[object_idx] = place_sampled
+            placements.append(object_idx)
+            # Where it lands on the stack isn't known; its own table height is
+            # the lowest it can be, which is what the reset's unstacking
+            # descent goes down towards.
+            if stacking:
+                self._object_positions[object_idx] = [*place_sampled[:2], height, *place_sampled[3:]]
+            else:
+                self._object_positions[object_idx] = place_sampled
 
-            segments.extend(self._pick_place_block(i, pick_pose, place_sampled, transit_speed))
+            segments.extend(
+                self._pick_place_block(
+                    i, pick_pose, place_sampled, transit_speed, place_descend_speed=place_descend_speed
+                )
+            )
             logger.info(
                 "====== [AUTO] Object %d/%d: pick=%s place=%s ======",
                 i,
@@ -652,27 +859,69 @@ class AutoPickPlaceController:
         transit_speed: float,
         name_prefix: str = "",
         allow_recovery: bool = True,
+        source_stack_top_z: float | None = None,
+        place_descend_speed: float | None = None,
+        straight: bool = False,
     ) -> list[Segment]:
         """Segments moving one object from source_pose to target_pose, starting
         from wherever the arm is: arc over to just above the object, descend
         slowly (suction on just before contact), seal, lift clear, arc over to
         just above the target, descend, release, retreat up. With
         allow_recovery, either approach may first go wrong and recover (see
-        AutoPickPlaceConfig.misalign_prob/miss_grasp_prob)."""
+        AutoPickPlaceConfig.misalign_prob/miss_grasp_prob).
+
+        With source_stack_top_z, the source sits somewhere on a stack whose
+        top is at most that high (source z is only its lowest possible height):
+        the pick approach ends align_height above it, and the descent goes
+        down from there at stack_descend_speed with suction already on until
+        force contact with the top object. place_descend_speed overrides the
+        place descent's speed (default descend_speed). With straight (scene
+        resets: not recorded, so nothing needs to look human), each transit is
+        straight up, across and down instead of an arc."""
         source_position = np.array(source_pose[:3], dtype=float)
         source_rotvec = np.array(source_pose[3:], dtype=float)
         target_position = np.array(target_pose[:3], dtype=float)
         target_rotvec = np.array(target_pose[3:], dtype=float)
-        cruise_z = max(source_position[2], target_position[2]) + self.config.approach_height
+        source_stacked = source_stack_top_z is not None
+        if source_stacked:
+            pick_approach_position = source_position.copy()
+            # Never below the object's own table height, even if
+            # stack_release_z is misconfigured below it.
+            pick_approach_position[2] = max(source_stack_top_z, source_position[2])
+        else:
+            pick_approach_position = source_position
+        cruise_z = max(pick_approach_position[2], target_position[2]) + self.config.approach_height
 
         def name(step: str) -> str:
             return f"{name_prefix}{step}_{index}"
 
+        if source_stacked:
+            pick_descent = [
+                Segment(
+                    name("descend_pick_stack"),
+                    Phase.DESCEND,
+                    gripper=1.0,
+                    position=source_position,
+                    rotvec=source_rotvec,
+                    speed=self.config.stack_descend_speed,
+                    force_stop=True,
+                )
+            ]
+        else:
+            pick_descent = self._descend_segments(name, source_position, source_rotvec, suction=True)
+
         segments = [
             *self._approach_segments(
-                name, source_position, source_rotvec, transit_speed, cruise_z, pick=True, allow_recovery=allow_recovery
+                name,
+                pick_approach_position,
+                source_rotvec,
+                transit_speed,
+                cruise_z,
+                pick=True,
+                allow_recovery=allow_recovery,
+                straight=straight,
             ),
-            *self._descend_segments(name, source_position, source_rotvec, suction=True),
+            *pick_descent,
             Segment(name("grasp"), Phase.GRASP, gripper=1.0, duration_s=self.config.grasp_seal_s),
             Segment(
                 name("lift"),
@@ -682,9 +931,16 @@ class AutoPickPlaceController:
                 speed=self.config.descend_speed,
             ),
             *self._approach_segments(
-                name, target_position, target_rotvec, transit_speed, cruise_z, pick=False, allow_recovery=allow_recovery
+                name,
+                target_position,
+                target_rotvec,
+                transit_speed,
+                cruise_z,
+                pick=False,
+                allow_recovery=allow_recovery,
+                straight=straight,
             ),
-            *self._descend_segments(name, target_position, target_rotvec, suction=False),
+            *self._descend_segments(name, target_position, target_rotvec, suction=False, speed=place_descend_speed),
             Segment(name("release"), Phase.RELEASE, gripper=0.0, duration_s=self.config.release_s),
             Segment(
                 name("retreat"),
@@ -705,9 +961,29 @@ class AutoPickPlaceController:
         cruise_z: float,
         pick: bool,
         allow_recovery: bool,
+        straight: bool = False,
     ) -> list[Segment]:
-        """Arc over to align_height above position, possibly via a recovered
-        mistake. The normal descent onto position follows these segments."""
+        """Arc over (or with straight, go up, across and down) to align_height
+        above position, possibly via a recovered mistake. The normal descent
+        onto position follows these segments; the last one waits up to
+        align_settle_timeout_s to actually get there."""
+        segments = self._approach_segments_unaligned(
+            name, position, rotvec, transit_speed, cruise_z, pick, allow_recovery, straight
+        )
+        segments[-1].settle_timeout_s = self.config.align_settle_timeout_s
+        return segments
+
+    def _approach_segments_unaligned(
+        self,
+        name,
+        position: np.ndarray,
+        rotvec: np.ndarray,
+        transit_speed: float,
+        cruise_z: float,
+        pick: bool,
+        allow_recovery: bool,
+        straight: bool,
+    ) -> list[Segment]:
         above = np.array([0.0, 0.0, self.config.align_height])
         step = "pick" if pick else "place"
         # Open the gripper on the way to a pick; keep holding on the way to a place.
@@ -769,13 +1045,48 @@ class AutoPickPlaceController:
                 correct_to_above(halfway),
             ]
 
+        if straight:
+            return [
+                Segment(
+                    name(f"rise_to_{step}"),
+                    Phase.TRANSIT,
+                    gripper=gripper,
+                    position=np.array([np.nan, np.nan, cruise_z]),
+                    speed=transit_speed,
+                ),
+                Segment(
+                    name(f"cross_to_{step}"),
+                    Phase.TRANSIT,
+                    gripper=gripper,
+                    position=np.array([position[0], position[1], cruise_z]),
+                    rotvec=rotvec,
+                    speed=transit_speed,
+                ),
+                Segment(
+                    name(f"lower_to_{step}"),
+                    Phase.TRANSIT,
+                    gripper=gripper,
+                    position=position + above,
+                    rotvec=rotvec,
+                    speed=transit_speed,
+                ),
+            ]
+
         return [transit(Phase.TRANSIT, np.zeros(3))]
 
     def _descend_segments(
-        self, name, position: np.ndarray, rotvec: np.ndarray, suction: bool, phase: Phase = Phase.DESCEND
+        self,
+        name,
+        position: np.ndarray,
+        rotvec: np.ndarray,
+        suction: bool,
+        phase: Phase = Phase.DESCEND,
+        speed: float | None = None,
     ) -> list[Segment]:
-        """Slow force-stop descent onto position. When suction is True, the
-        last suction_lead_m is split off and switches suction on as it starts."""
+        """Slow force-stop descent onto position, at descend_speed unless speed
+        is given. When suction is True, the last suction_lead_m is split off
+        and switches suction on as it starts."""
+        speed = self.config.descend_speed if speed is None else speed
         lead = self.config.suction_lead_m if suction else 0.0
         step = "descend_pick" if suction else "descend_place"
         if phase == Phase.PERTURB:
@@ -789,7 +1100,7 @@ class AutoPickPlaceController:
                     gripper=None,
                     position=position + np.array([0.0, 0.0, lead]),
                     rotvec=rotvec,
-                    speed=self.config.descend_speed,
+                    speed=speed,
                     force_stop=True,
                 )
             )
@@ -800,7 +1111,7 @@ class AutoPickPlaceController:
                 gripper=1.0 if suction else None,
                 position=position,
                 rotvec=rotvec,
-                speed=self.config.descend_speed,
+                speed=speed,
                 force_stop=True,
             )
         )
@@ -815,28 +1126,112 @@ class AutoPickPlaceController:
     ) -> list[float]:
         """Sample a pose uniformly inside region at the given height, rejecting
         candidates too close to positions already placed earlier."""
+        self._require_canonical_orientation()
+        best, best_separation = None, -1.0
+        for _ in range(self.config.place_sampling_max_attempts):
+            candidate = _sample_region_position(region, height, self._canonical_rotvec)
+            separation = _min_xy_distance(candidate, existing_positions)
+            if separation >= min_separation:
+                return candidate
+            if separation > best_separation:
+                best, best_separation = candidate, separation
+
+        logger.warning(
+            "====== [AUTO] Could not find a position >= %.3fm from prior placements "
+            "after %d attempts; using the farthest one found (%.3fm). ======",
+            min_separation,
+            self.config.place_sampling_max_attempts,
+            best_separation,
+        )
+        return best
+
+    def _plan_pick_poses(self, heights: list[float]) -> list[list[float]]:
+        """One pick_region pose per object (scene reset), planned together:
+        every pose is at least pick_min_separation from the others and at
+        least place_region.exclusion_radius from its center (if set), else,
+        unless pick_place_region_clearance is null, more than that far from
+        place_region.
+
+        Objects are placed one at a time with up to PER_OBJECT_ATTEMPTS
+        tries each; if one doesn't fit, the whole plan is thrown away and
+        redrawn from scratch (up to place_sampling_max_attempts plans), since
+        earlier objects landing badly can block the rest even when all of
+        them fit. If no plan fits, the one whose closest pair is farthest
+        apart is used, with a warning."""
+        self._require_canonical_orientation()
+        region = self.config.pick_region
+        min_separation = self.config.pick_min_separation
+        clearance = self.config.pick_place_region_clearance
+
+        place_region = self.config.place_region
+
+        def clear_of_place_region(candidate: list[float]) -> bool:
+            if place_region.exclusion_radius is not None:
+                return (
+                    np.hypot(candidate[0] - place_region.center[0], candidate[1] - place_region.center[1])
+                    >= place_region.exclusion_radius
+                )
+            return clearance is None or place_region.distance_to(candidate[:2]) > clearance
+
+        def candidate_for(height: float) -> list[float] | None:
+            for _ in range(PER_OBJECT_ATTEMPTS):
+                candidate = _sample_region_position(region, height, self._canonical_rotvec)
+                if clear_of_place_region(candidate):
+                    return candidate
+            return None
+
+        best_plan, best_separation = None, -1.0
+        for _ in range(self.config.place_sampling_max_attempts):
+            plan: list[list[float]] = []
+            for height in heights:
+                # Among a few tries, keep the one farthest from the plan so far.
+                chosen, chosen_separation = None, -1.0
+                for _ in range(PER_OBJECT_ATTEMPTS):
+                    candidate = candidate_for(height)
+                    if candidate is None:
+                        continue
+                    separation = _min_xy_distance(candidate, plan)
+                    if separation > chosen_separation:
+                        chosen, chosen_separation = candidate, separation
+                    if separation >= min_separation:
+                        break
+                if chosen is None:
+                    raise ValueError(
+                        "auto_pick_place: no spot in pick_region is clear of place_region - enlarge "
+                        "pick_region or lower place_region.exclusion_radius / pick_place_region_clearance."
+                    )
+                plan.append(chosen)
+            plan_separation = min((_min_xy_distance(pose, plan[:k]) for k, pose in enumerate(plan)), default=np.inf)
+            if plan_separation >= min_separation:
+                return plan
+            if plan_separation > best_separation:
+                best_plan, best_separation = plan, plan_separation
+
+        logger.warning(
+            "====== [AUTO] No plan with all %d objects >= %.3fm apart after %d tries; using the best one "
+            "(closest pair %.3fm apart). ======",
+            len(heights),
+            min_separation,
+            self.config.place_sampling_max_attempts,
+            best_separation,
+        )
+        return best_plan
+
+    def _require_canonical_orientation(self) -> None:
         if self._canonical_rotvec is None:
             raise ValueError(
                 "AutoPickPlaceController has no canonical orientation. "
                 "set_canonical_orientation_from_current_pose() must run before sampling."
             )
-        candidate = _sample_region_position(region, height, self._canonical_rotvec)
-        for _ in range(self.config.place_sampling_max_attempts):
-            candidate_position = np.array(candidate[:3], dtype=float)
-            if all(
-                np.linalg.norm(candidate_position - prev) >= min_separation
-                for prev in existing_positions
-            ):
-                return candidate
-            candidate = _sample_region_position(region, height, self._canonical_rotvec)
 
-        logger.warning(
-            "====== [AUTO] Could not find a position >= %.3fm from prior placements "
-            "after %d attempts; using closest candidate found. ======",
-            min_separation,
-            self.config.place_sampling_max_attempts,
-        )
-        return candidate
+
+# Tries per object within one pick plan (see _plan_pick_poses).
+PER_OBJECT_ATTEMPTS = 30
+
+
+def _min_xy_distance(pose: list[float], others: list) -> float:
+    """Horizontal distance from pose to the closest of others (inf if none)."""
+    return min((float(np.hypot(pose[0] - o[0], pose[1] - o[1])) for o in others), default=np.inf)
 
 
 def _min_jerk(tau: float) -> float:
