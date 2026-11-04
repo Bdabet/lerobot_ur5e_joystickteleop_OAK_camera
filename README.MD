@@ -283,3 +283,26 @@ tools-prune-dataset "[id1,...,idN]"
 ```bash
 tools-check-info
 ```
+
+## pi0.5 remote inference
+
+`scripts/core/run_policy.py` runs a pi0.5 policy served from a GPU machine (openpi
+`scripts/serve_policy.py`, see openpi `examples/ur5_pick_place/README.md`). It is the recording
+loop with the policy instead of the scripted teleop: same `UR5e` robot, same `cfg.yaml`
+(fps, `servo_time`, speed caps), same `get_observation()` / `send_action()`.
+
+```bash
+pip install -r requirements.txt        # adds msgpack, websockets, dm-tree; keeps numpy 2
+curl http://<GPU_PC_IP>:8000/healthz   # reachability
+
+# a) link only, random observations
+python -m scripts.core.run_policy --host <GPU_PC_IP> --fake-obs --num-steps 50
+# b) real cameras + state, robot never moves (jog the arm to init_joints_deg first)
+python -m scripts.core.run_policy --host <GPU_PC_IP> --dry-run --prompt "stack the plates"
+# c) closed loop: moveJ to init_joints_deg, then the policy; e-stop in hand
+python -m scripts.core.run_policy --host <GPU_PC_IP> --prompt "stack the plates" \
+  --workspace-min <x y z> --workspace-max <x y z>
+```
+
+`--prompt` should be one of the recorded task strings (`TRAINING_TASKS` in the script).
+`openpi_client/` is a vendored copy of openpi's client (its pip package pins `numpy<2`).
