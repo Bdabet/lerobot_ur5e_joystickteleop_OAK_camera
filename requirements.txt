@@ -4,3 +4,8 @@
 
 # Install the main project in editable mode
 -e .
+
+# pi0.5 remote inference client (scripts/core/run_policy.py, vendored openpi_client/)
+msgpack>=1.0.5
+websockets>=11.0
+dm-tree>=0.1.8

@@ -9,7 +9,7 @@ setup(
     packages=[
         *find_packages(where="lerobot_robot_ur5e"),
         *find_packages(where="lerobot_teleoperator_ur5e"),
-        *find_packages(where=".", include=["scripts", "scripts.*"]),
+        *find_packages(where=".", include=["scripts", "scripts.*", "openpi_client"]),
     ],
     package_dir={
         "lerobot_robot_ur5e": "lerobot_robot_ur5e/lerobot_robot_ur5e",
